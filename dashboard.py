@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import json
+from datetime import datetime
+from decimal import Decimal
+
 import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
 from database import (
+    BOMEntryRow,
     EventRow,
     FactoryConfigRow,
     ManufacturingOrderRow,
     ProductRow,
+    PurchaseOrderRow,
     SessionLocal,
     SupplierCatalogRow,
     SupplierRow,
@@ -47,6 +53,167 @@ db = _get_session()
 def _current_day() -> int:
     row = db.query(FactoryConfigRow).filter(FactoryConfigRow.key == "current_day").first()
     return int(row.value) if row else 0
+
+
+# ---------------------------------------------------------------------------
+# Import / Export helpers
+# ---------------------------------------------------------------------------
+
+_SNAPSHOT_VERSION = "1.0"
+
+_REQUIRED_TABLES = {
+    "factory_config", "suppliers", "products", "supplier_catalog",
+    "bom_entries", "manufacturing_orders", "purchase_orders", "events",
+}
+
+
+def _build_snapshot() -> str:
+    """Serialise the entire database to a JSON string.
+
+    The returned document includes a ``version`` tag and ``exported_at``
+    timestamp so snapshots can be identified and validated on import.
+    """
+    def _dt(d: datetime | None) -> str | None:
+        return d.isoformat() if d else None
+
+    snapshot = {
+        "version": _SNAPSHOT_VERSION,
+        "exported_at": datetime.utcnow().isoformat(),
+        "data": {
+            "factory_config": [
+                {"key": r.key, "value": r.value}
+                for r in db.query(FactoryConfigRow).all()
+            ],
+            "suppliers": [
+                {"id": r.id, "name": r.name, "contact_email": r.contact_email}
+                for r in db.query(SupplierRow).all()
+            ],
+            "products": [
+                {
+                    "id": r.id, "name": r.name,
+                    "current_stock": r.current_stock, "storage_size": r.storage_size,
+                }
+                for r in db.query(ProductRow).all()
+            ],
+            "supplier_catalog": [
+                {
+                    "id": r.id, "supplier_id": r.supplier_id, "part_id": r.part_id,
+                    "unit_price": str(r.unit_price),
+                    "min_order_qty": r.min_order_qty, "lead_time_days": r.lead_time_days,
+                }
+                for r in db.query(SupplierCatalogRow).all()
+            ],
+            "bom_entries": [
+                {"id": r.id, "part_id": r.part_id, "quantity_per_unit": r.quantity_per_unit}
+                for r in db.query(BOMEntryRow).all()
+            ],
+            "manufacturing_orders": [
+                {
+                    "id": r.id, "quantity": r.quantity, "status": r.status,
+                    "created_at": _dt(r.created_at), "started_at": _dt(r.started_at),
+                    "completed_at": _dt(r.completed_at), "days_elapsed": r.days_elapsed,
+                }
+                for r in db.query(ManufacturingOrderRow).all()
+            ],
+            "purchase_orders": [
+                {
+                    "id": r.id, "part_id": r.part_id, "supplier_id": r.supplier_id,
+                    "quantity": r.quantity, "unit_price": str(r.unit_price),
+                    "status": r.status,
+                    "created_at": _dt(r.created_at), "ship_date": _dt(r.ship_date),
+                    "delivered_at": _dt(r.delivered_at),
+                    "lead_time_remaining": r.lead_time_remaining,
+                }
+                for r in db.query(PurchaseOrderRow).all()
+            ],
+            "events": [
+                {
+                    "id": r.id, "day": r.day, "event_type": r.event_type,
+                    "entity_type": r.entity_type, "entity_id": r.entity_id,
+                    "description": r.description, "event_metadata": r.event_metadata,
+                }
+                for r in db.query(EventRow).all()
+            ],
+        },
+    }
+    return json.dumps(snapshot, indent=2)
+
+
+def _restore_snapshot(snapshot: dict) -> None:
+    """Clear all tables and repopulate them from *snapshot*.
+
+    Raises:
+        ValueError: If the snapshot is structurally invalid (missing keys).
+        Exception: Any SQLAlchemy error; the caller must rollback on failure.
+    """
+    data = snapshot.get("data", {})
+    missing = _REQUIRED_TABLES - set(data.keys())
+    if missing:
+        raise ValueError(f"Snapshot is missing required table(s): {sorted(missing)}")
+
+    def _dt(s: str | None) -> datetime | None:
+        return datetime.fromisoformat(s) if s else None
+
+    # Delete in reverse FK-dependency order so SQLite is happy even with FK
+    # enforcement enabled.
+    db.query(EventRow).delete()
+    db.query(PurchaseOrderRow).delete()
+    db.query(ManufacturingOrderRow).delete()
+    db.query(SupplierCatalogRow).delete()
+    db.query(BOMEntryRow).delete()
+    db.query(ProductRow).delete()
+    db.query(SupplierRow).delete()
+    db.query(FactoryConfigRow).delete()
+    db.flush()  # Send deletes before inserts
+
+    for r in data["factory_config"]:
+        db.add(FactoryConfigRow(key=r["key"], value=r["value"]))
+
+    for r in data["suppliers"]:
+        db.add(SupplierRow(id=r["id"], name=r["name"], contact_email=r.get("contact_email")))
+
+    for r in data["products"]:
+        db.add(ProductRow(
+            id=r["id"], name=r["name"],
+            current_stock=r["current_stock"], storage_size=r["storage_size"],
+        ))
+
+    for r in data["supplier_catalog"]:
+        db.add(SupplierCatalogRow(
+            id=r["id"], supplier_id=r["supplier_id"], part_id=r["part_id"],
+            unit_price=Decimal(r["unit_price"]),
+            min_order_qty=r["min_order_qty"], lead_time_days=r["lead_time_days"],
+        ))
+
+    for r in data["bom_entries"]:
+        db.add(BOMEntryRow(id=r["id"], part_id=r["part_id"],
+                           quantity_per_unit=r["quantity_per_unit"]))
+
+    for r in data["manufacturing_orders"]:
+        db.add(ManufacturingOrderRow(
+            id=r["id"], quantity=r["quantity"], status=r["status"],
+            created_at=_dt(r.get("created_at")), started_at=_dt(r.get("started_at")),
+            completed_at=_dt(r.get("completed_at")), days_elapsed=r.get("days_elapsed"),
+        ))
+
+    for r in data["purchase_orders"]:
+        db.add(PurchaseOrderRow(
+            id=r["id"], part_id=r["part_id"], supplier_id=r["supplier_id"],
+            quantity=r["quantity"], unit_price=Decimal(r["unit_price"]),
+            status=r["status"],
+            created_at=_dt(r.get("created_at")), ship_date=_dt(r.get("ship_date")),
+            delivered_at=_dt(r.get("delivered_at")),
+            lead_time_remaining=r.get("lead_time_remaining"),
+        ))
+
+    for r in data["events"]:
+        db.add(EventRow(
+            id=r["id"], day=r["day"], event_type=r["event_type"],
+            entity_type=r["entity_type"], entity_id=r["entity_id"],
+            description=r["description"], event_metadata=r.get("event_metadata"),
+        ))
+
+    db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +269,7 @@ st.divider()
 # Tabs — Overview | Orders
 # ---------------------------------------------------------------------------
 
-overview_tab, orders_tab, analytics_tab = st.tabs(["Overview", "Orders", "Analytics"])
+overview_tab, orders_tab, analytics_tab, system_tab = st.tabs(["Overview", "Orders", "Analytics", "System"])
 
 # ── Overview tab ────────────────────────────────────────────────────────────
 
@@ -345,3 +512,85 @@ with analytics_tab:
         fig_line.tight_layout()
         st.pyplot(fig_line)
         plt.close(fig_line)
+
+# ── System tab ───────────────────────────────────────────────────────────────
+
+with system_tab:
+
+    # --- Export ---
+    st.subheader("Export")
+    st.caption(
+        "Download a complete snapshot of the current database state as JSON. "
+        "The file includes a version tag and timestamp for traceability."
+    )
+
+    snapshot_json = _build_snapshot()
+    export_filename = f"factory_snapshot_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
+    st.download_button(
+        label="Download Snapshot",
+        data=snapshot_json,
+        file_name=export_filename,
+        mime="application/json",
+        type="primary",
+    )
+
+    st.divider()
+
+    # --- Import ---
+    st.subheader("Import")
+    st.caption(
+        "Upload a previously exported snapshot to restore the full database state. "
+        "**This will erase all current data.**"
+    )
+
+    uploaded_file = st.file_uploader("Choose a snapshot file", type=["json"])
+
+    if uploaded_file is not None:
+        try:
+            raw_bytes = uploaded_file.read()
+            snapshot = json.loads(raw_bytes)
+        except json.JSONDecodeError as exc:
+            st.error(f"Could not parse the file — malformed JSON: {exc}")
+            snapshot = None
+
+        if snapshot is not None:
+            # Show snapshot metadata before the user commits to restoring
+            version = snapshot.get("version", "unknown")
+            exported_at = snapshot.get("exported_at", "unknown")
+
+            if "version" not in snapshot:
+                st.error("Invalid snapshot: missing required 'version' field.")
+                snapshot = None
+            elif "data" not in snapshot:
+                st.error("Invalid snapshot: missing required 'data' field.")
+                snapshot = None
+            else:
+                st.info(
+                    f"Snapshot version **{version}** — exported at `{exported_at}`"
+                )
+
+                # Summarise row counts from the file so the user knows what they are
+                # restoring before clicking the confirm button.
+                data = snapshot["data"]
+                count_cols = st.columns(4)
+                count_cols[0].metric("Products", len(data.get("products", [])))
+                count_cols[1].metric("MO Records", len(data.get("manufacturing_orders", [])))
+                count_cols[2].metric("PO Records", len(data.get("purchase_orders", [])))
+                count_cols[3].metric("Events", len(data.get("events", [])))
+
+                st.warning(
+                    "Proceeding will **permanently delete** all current data and "
+                    "replace it with the snapshot above."
+                )
+
+                if st.button("Restore Snapshot", type="primary"):
+                    try:
+                        _restore_snapshot(snapshot)
+                        db.expire_all()
+                        st.success("Database restored successfully from snapshot.")
+                        st.rerun()
+                    except ValueError as exc:
+                        st.error(f"Snapshot validation failed: {exc}")
+                    except Exception as exc:
+                        db.rollback()
+                        st.error(f"Restore failed — database unchanged: {exc}")
