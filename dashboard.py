@@ -233,6 +233,22 @@ with st.sidebar:
     st.divider()
     st.caption("Press 'Next Day' to advance the simulation by one day.")
 
+    # --- Factory Log (last 3 events) ---
+    st.divider()
+    st.markdown("**Factory Log**")
+    recent = (
+        db.query(EventRow)
+        .order_by(EventRow.day.desc(), EventRow.id.desc())
+        .limit(3)
+        .all()
+    )
+    if recent:
+        for e in recent:
+            st.caption(f"Day {e.day} · {e.event_type}")
+            st.caption(f"↳ {e.description[:72]}{'…' if len(e.description) > 72 else ''}")
+    else:
+        st.caption("No events yet.")
+
 # ---------------------------------------------------------------------------
 # Page header
 # ---------------------------------------------------------------------------

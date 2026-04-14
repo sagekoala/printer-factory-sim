@@ -1,16 +1,36 @@
 """Simulation engine for the 3D Printer Production Simulator.
 
-The public entry point is :func:`advance_day`, which progresses the factory
-by one simulation day in four ordered phases:
+Public functions
+----------------
+:func:`advance_day`
+    The main simulation clock tick.  Call once per simulated day to run all
+    four production phases and persist the results.
 
-1. Increment the current simulation day stored in ``FactoryConfig``.
-2. Deliver any ``PurchaseOrder`` rows whose lead-time countdown has reached zero.
-3. Generate new random demand as ``ManufacturingOrder`` rows.
-4. Fulfil as many pending ``ManufacturingOrder`` rows as daily capacity and
-   on-hand inventory allow (FIFO, oldest orders first).
+:func:`create_purchase_order`
+    Operator action: place a restocking order with a supplier.  Looks up the
+    ``SupplierCatalog`` for pricing and lead time, then creates a
+    ``PurchaseOrder`` row that ``advance_day`` will deliver automatically.
 
-Every major action — stock arrival, new demand, printer completed — is
-recorded as an :class:`~models.Event` row for the audit log.
+:func:`release_manufacturing_order`
+    Operator action: immediately attempt to build a specific pending order,
+    bypassing the daily capacity ceiling.  Used by the dashboard's "Release
+    for Production" button.
+
+Advance Day — four phases
+--------------------------
+1. **Day increment** — ``current_day`` in ``FactoryConfig`` is bumped by 1.
+2. **PO delivery** — every pending ``PurchaseOrder`` with ``lead_time_remaining``
+   set has its counter decremented; those reaching zero are marked ``delivered``
+   and their parts are added to ``current_stock``.
+3. **Demand generation** — between ``demand_min`` and ``demand_max`` new
+   single-printer ``ManufacturingOrder`` rows are created.
+4. **Order fulfilment** — pending ``ManufacturingOrder`` rows are processed
+   FIFO; each is fulfilled if stock satisfies the BOM *and* the day's capacity
+   ceiling has not been reached.  Under-stocked orders are skipped (not
+   cancelled) so they will be retried on subsequent days.
+
+Every significant action writes a row to the ``events`` table for auditing
+and chart history.
 """
 
 from __future__ import annotations
@@ -447,7 +467,20 @@ def _log(
     description: str,
     extra: dict | None = None,
 ) -> None:
-    """Append one row to the ``events`` table."""
+    """Append one row to the ``events`` table.
+
+    Args:
+        db: Active SQLAlchemy session.  The row is added but not committed;
+            the caller is responsible for committing when the full operation
+            is complete.
+        day: Current simulation day number.
+        event_type: Categorises the event for filtering and charting.
+        entity_type: Human-readable table name of the affected entity
+            (e.g. ``"manufacturing_order"``, ``"purchase_order"``).
+        entity_id: Primary key of the affected row (stored as a string).
+        description: Human-readable summary shown in the dashboard log.
+        extra: Optional dict of structured metadata serialised to JSON.
+    """
     db.add(EventRow(
         id=str(uuid.uuid4()),
         day=day,

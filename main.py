@@ -1,9 +1,18 @@
 """REST API entry point for the 3D Printer Production Simulator.
 
-Start the server with:
+This module wires FastAPI routes to the simulation and database layers.
+All business logic lives in ``simulation.py``; all persistence lives in
+``database.py``.  This file is intentionally thin: routes validate input,
+call a service function, and serialise the result.
+
+Start the server
+----------------
     uvicorn main:app --reload
 
-Interactive docs are available at http://localhost:8000/docs
+Interactive docs
+----------------
+    http://localhost:8000/docs    (Swagger UI)
+    http://localhost:8000/redoc   (ReDoc)
 """
 
 from __future__ import annotations
@@ -89,6 +98,11 @@ class AdvanceDayResponse(BaseModel):
 
 
 def _map_product(row: ProductRow) -> Product:
+    """Convert a :class:`~database.ProductRow` ORM object to a :class:`~models.Product`.
+
+    String IDs stored in SQLite are cast back to ``uuid.UUID`` so the Pydantic
+    model's type contract is satisfied.
+    """
     return Product(
         id=uuid.UUID(row.id),
         name=row.name,
@@ -98,6 +112,11 @@ def _map_product(row: ProductRow) -> Product:
 
 
 def _map_manufacturing_order(row: ManufacturingOrderRow) -> ManufacturingOrder:
+    """Convert a :class:`~database.ManufacturingOrderRow` to a :class:`~models.ManufacturingOrder`.
+
+    The ``status`` string is coerced to the :class:`~models.ManufacturingOrderStatus`
+    enum so FastAPI can serialise it consistently.
+    """
     return ManufacturingOrder(
         id=uuid.UUID(row.id),
         quantity=row.quantity,
@@ -110,6 +129,12 @@ def _map_manufacturing_order(row: ManufacturingOrderRow) -> ManufacturingOrder:
 
 
 def _map_purchase_order(row: PurchaseOrderRow) -> PurchaseOrder:
+    """Convert a :class:`~database.PurchaseOrderRow` to a :class:`~models.PurchaseOrder`.
+
+    ``unit_price`` is stored as ``Numeric(10, 2)`` in SQLite and returned as a
+    string by some drivers; wrapping it in ``Decimal(str(...))`` normalises this
+    before Pydantic validates the field.
+    """
     return PurchaseOrder(
         id=uuid.UUID(row.id),
         part_id=uuid.UUID(row.part_id),
