@@ -4,3 +4,4 @@ pydantic
 streamlit
 sqlalchemy
 pandas
+matplotlib

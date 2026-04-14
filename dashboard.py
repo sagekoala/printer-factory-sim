@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
@@ -15,7 +16,7 @@ from database import (
     SupplierRow,
     init_db,
 )
-from models import ManufacturingOrderStatus
+from models import EventType, ManufacturingOrderStatus
 from simulation import advance_day, create_purchase_order, release_manufacturing_order
 
 # ---------------------------------------------------------------------------
@@ -101,7 +102,7 @@ st.divider()
 # Tabs — Overview | Orders
 # ---------------------------------------------------------------------------
 
-overview_tab, orders_tab = st.tabs(["Overview", "Orders"])
+overview_tab, orders_tab, analytics_tab = st.tabs(["Overview", "Orders", "Analytics"])
 
 # ── Overview tab ────────────────────────────────────────────────────────────
 
@@ -252,3 +253,95 @@ with orders_tab:
                 else:
                     st.error(f"Could not release order: {err}")
                 st.rerun()
+
+# ── Analytics tab ────────────────────────────────────────────────────────────
+
+with analytics_tab:
+
+    # --- Bar chart: current inventory levels ---
+    st.subheader("Current Inventory Levels")
+
+    chart_parts = db.query(ProductRow).order_by(ProductRow.name).all()
+
+    if not chart_parts:
+        st.info("No parts found. Run `python seed.py` to load initial data.")
+    else:
+        part_names = [p.name for p in chart_parts]
+        stock_levels = [p.current_stock for p in chart_parts]
+
+        fig_bar, ax_bar = plt.subplots(figsize=(8, 4))
+        bars = ax_bar.bar(part_names, stock_levels, color="#4C9BE8", edgecolor="white")
+        ax_bar.set_xlabel("Part", labelpad=8)
+        ax_bar.set_ylabel("Units in Stock")
+        ax_bar.set_title("Inventory by Part")
+        ax_bar.yaxis.grid(True, alpha=0.35, linestyle="--")
+        ax_bar.set_axisbelow(True)
+
+        # Label each bar with its exact value
+        for bar, val in zip(bars, stock_levels):
+            ax_bar.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + max(stock_levels, default=1) * 0.02,
+                str(val),
+                ha="center",
+                va="bottom",
+                fontsize=9,
+            )
+
+        fig_bar.tight_layout()
+        st.pyplot(fig_bar)
+        plt.close(fig_bar)
+
+    st.divider()
+
+    # --- Line chart: cumulative completed printers per day ---
+    st.subheader("Completed Printers Over Time")
+
+    # Reconstruct history from PRODUCTION_COMPLETED events on individual MOs.
+    # Each such event carries {"quantity_built": N} in event_metadata.
+    completion_events = (
+        db.query(EventRow)
+        .filter(
+            EventRow.event_type == EventType.PRODUCTION_COMPLETED.value,
+            EventRow.entity_type == "manufacturing_order",
+        )
+        .order_by(EventRow.day)
+        .all()
+    )
+
+    if not completion_events:
+        st.info("No completed printers yet. Advance a few days to generate data.")
+    else:
+        # Aggregate units built per simulation day
+        day_totals: dict[int, int] = {}
+        for e in completion_events:
+            qty = (e.event_metadata or {}).get("quantity_built", 1)
+            day_totals[e.day] = day_totals.get(e.day, 0) + qty
+
+        days_sorted = sorted(day_totals.keys())
+
+        # Fill any gaps so the x-axis is continuous (days with no completions → 0)
+        all_days = list(range(min(days_sorted), max(days_sorted) + 1))
+        daily_built = [day_totals.get(d, 0) for d in all_days]
+
+        # Cumulative sum
+        cumulative: list[int] = []
+        running = 0
+        for v in daily_built:
+            running += v
+            cumulative.append(running)
+
+        fig_line, ax_line = plt.subplots(figsize=(8, 4))
+        ax_line.plot(all_days, cumulative, marker="o", markersize=4,
+                     color="#27AE60", linewidth=2, label="Cumulative")
+        ax_line.fill_between(all_days, cumulative, alpha=0.12, color="#27AE60")
+        ax_line.set_xlabel("Simulation Day", labelpad=8)
+        ax_line.set_ylabel("Total Completed Printers")
+        ax_line.set_title("Cumulative Printers Completed")
+        ax_line.yaxis.grid(True, alpha=0.35, linestyle="--")
+        ax_line.set_axisbelow(True)
+        ax_line.legend()
+
+        fig_line.tight_layout()
+        st.pyplot(fig_line)
+        plt.close(fig_line)
