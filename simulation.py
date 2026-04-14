@@ -28,6 +28,7 @@ from database import (
     ManufacturingOrderRow,
     ProductRow,
     PurchaseOrderRow,
+    SupplierCatalogRow,
 )
 from models import EventType, ManufacturingOrderStatus, PurchaseOrderStatus
 
@@ -68,6 +69,139 @@ def advance_day(db: Session) -> int:
     _fulfill_manufacturing_orders(db, day)
     db.commit()
     return day
+
+
+def create_purchase_order(
+    db: Session,
+    part_id: str,
+    supplier_id: str,
+    quantity: int,
+) -> tuple[PurchaseOrderRow | None, str]:
+    """Create and persist a :class:`~database.PurchaseOrderRow`.
+
+    Looks up the ``SupplierCatalog`` to obtain the locked-in unit price and
+    lead time, then initialises ``lead_time_remaining`` so the simulation's
+    daily delivery phase can count it down automatically.
+
+    Args:
+        db: Active SQLAlchemy session.
+        part_id: ID of the part to order.
+        supplier_id: ID of the chosen supplier.
+        quantity: Units to order (must meet the supplier's minimum).
+
+    Returns:
+        ``(po, "")`` on success, or ``(None, error_message)`` on failure.
+        The caller is responsible for nothing further — the session is
+        committed inside this function.
+    """
+    catalog = (
+        db.query(SupplierCatalogRow)
+        .filter(
+            SupplierCatalogRow.supplier_id == supplier_id,
+            SupplierCatalogRow.part_id == part_id,
+        )
+        .first()
+    )
+    if catalog is None:
+        return None, "No catalog entry found for this supplier/part combination."
+    if quantity < catalog.min_order_qty:
+        return None, (
+            f"Quantity {quantity} is below the supplier minimum of {catalog.min_order_qty}."
+        )
+
+    po_id = str(uuid.uuid4())
+    po = PurchaseOrderRow(
+        id=po_id,
+        part_id=part_id,
+        supplier_id=supplier_id,
+        quantity=quantity,
+        unit_price=catalog.unit_price,
+        status=PurchaseOrderStatus.pending.value,
+        created_at=datetime.utcnow(),
+        lead_time_remaining=catalog.lead_time_days,
+    )
+    db.add(po)
+
+    day = int(_get_config(db, "current_day", 0))
+    _log(
+        db, day,
+        EventType.PURCHASE_CREATED,
+        entity_type="purchase_order",
+        entity_id=po_id,
+        description=(
+            f"Day {day}: PO created — {quantity}x part ordered from supplier "
+            f"(lead time: {catalog.lead_time_days} days, "
+            f"${catalog.unit_price}/unit)"
+        ),
+        extra={
+            "part_id": part_id,
+            "supplier_id": supplier_id,
+            "quantity": quantity,
+            "unit_price": str(catalog.unit_price),
+            "lead_time_days": catalog.lead_time_days,
+        },
+    )
+    db.commit()
+    return po, ""
+
+
+def release_manufacturing_order(
+    db: Session,
+    mo_id: str,
+) -> tuple[bool, str]:
+    """Immediately attempt to build a specific pending MO.
+
+    Checks BOM stock, consumes components, and marks the order ``completed``
+    in a single operation.  Unlike :func:`advance_day`, this does not consume
+    daily production capacity — it is an explicit operator override.
+
+    Args:
+        db: Active SQLAlchemy session.
+        mo_id: Primary key of the :class:`~database.ManufacturingOrderRow`.
+
+    Returns:
+        ``(True, "")`` on success, ``(False, reason)`` if the MO cannot be
+        fulfilled.  The session is committed on success only.
+    """
+    mo = db.query(ManufacturingOrderRow).filter(ManufacturingOrderRow.id == mo_id).first()
+    if mo is None:
+        return False, f"Manufacturing order {mo_id!r} not found."
+    if mo.status != ManufacturingOrderStatus.pending.value:
+        return False, f"Order is not pending (current status: {mo.status!r})."
+
+    bom = db.query(BOMEntryRow).all()
+    if not bom:
+        return False, "No Bill of Materials is defined — cannot build printers."
+
+    shortfall = _bom_shortfall(db, bom, mo.quantity)
+    if shortfall:
+        parts_list = ", ".join(f"{name}: need {n} more" for name, n in shortfall.items())
+        return False, f"Insufficient stock — {parts_list}."
+
+    # Consume BOM components
+    for entry in bom:
+        part = db.query(ProductRow).filter(ProductRow.id == entry.part_id).first()
+        part.current_stock -= entry.quantity_per_unit * mo.quantity
+
+    mo.status = ManufacturingOrderStatus.completed.value
+    mo.started_at = datetime.utcnow()
+    mo.completed_at = datetime.utcnow()
+    mo.days_elapsed = 0  # Manually released; not driven by the daily tick
+
+    day = int(_get_config(db, "current_day", 0))
+    _log(
+        db, day,
+        EventType.PRODUCTION_COMPLETED,
+        entity_type="manufacturing_order",
+        entity_id=mo_id,
+        description=(
+            f"Day {day}: MO manually released — "
+            f"completed {mo.quantity}x {PRODUCT_NAME}"
+        ),
+        extra={"product": PRODUCT_NAME, "quantity_built": mo.quantity, "manual": True},
+    )
+    db.commit()
+    return True, ""
 
 
 # ---------------------------------------------------------------------------
