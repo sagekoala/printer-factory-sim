@@ -48,23 +48,28 @@ try:
         EventRow,
         FactoryConfigRow,
         ManufacturingOrderRow,
+        OutboundPurchaseOrderRow,
         ProductRow,
         PurchaseOrderRow,
         SupplierCatalogRow,
         SupplierRow,
     )
     from manufacturer.models import EventType, ManufacturingOrderStatus, PurchaseOrderStatus
+    from manufacturer.provider_integration import sync_outbound_purchase_orders
 except ModuleNotFoundError:
     from database import (
         BOMEntryRow,
         EventRow,
         FactoryConfigRow,
         ManufacturingOrderRow,
+        OutboundPurchaseOrderRow,
         ProductRow,
         PurchaseOrderRow,
         SupplierCatalogRow,
+        SupplierRow,
     )
     from models import EventType, ManufacturingOrderStatus, PurchaseOrderStatus
+    from provider_integration import sync_outbound_purchase_orders
 
 # ---------------------------------------------------------------------------
 # Constants (all overridable via factory_config table)
@@ -98,6 +103,7 @@ def advance_day(db: Session) -> int:
         The new current simulation day (1-based).
     """
     day = _increment_day(db)
+    sync_outbound_purchase_orders(db, day)
     _deliver_purchase_orders(db, day)
     _generate_demand(db, day)
     _fulfill_manufacturing_orders(db, day)
@@ -318,6 +324,19 @@ def export_state(db: Session) -> dict:
                 }
                 for r in db.query(EventRow).all()
             ],
+            "outbound_purchase_orders": [
+                {
+                    "id": r.id,
+                    "provider_name": r.provider_name,
+                    "provider_order_id": r.provider_order_id,
+                    "product_name": r.product_name,
+                    "quantity": r.quantity,
+                    "placed_day": r.placed_day,
+                    "expected_delivery_day": r.expected_delivery_day,
+                    "status": r.status,
+                }
+                for r in db.query(OutboundPurchaseOrderRow).all()
+            ],
         },
     }
 
@@ -344,6 +363,7 @@ def import_state(db: Session, snapshot: dict) -> None:
 
     db.query(EventRow).delete()
     db.query(PurchaseOrderRow).delete()
+    db.query(OutboundPurchaseOrderRow).delete()
     db.query(ManufacturingOrderRow).delete()
     db.query(SupplierCatalogRow).delete()
     db.query(BOMEntryRow).delete()
@@ -417,6 +437,18 @@ def import_state(db: Session, snapshot: dict) -> None:
             entity_id=r["entity_id"],
             description=r["description"],
             event_metadata=r.get("event_metadata"),
+        ))
+
+    for r in data.get("outbound_purchase_orders", []):
+        db.add(OutboundPurchaseOrderRow(
+            id=r["id"],
+            provider_name=r["provider_name"],
+            provider_order_id=r["provider_order_id"],
+            product_name=r["product_name"],
+            quantity=r["quantity"],
+            placed_day=r["placed_day"],
+            expected_delivery_day=r["expected_delivery_day"],
+            status=r["status"],
         ))
 
     db.commit()
