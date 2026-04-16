@@ -7,7 +7,7 @@ call a service function, and serialise the result.
 
 Start the server
 ----------------
-    uvicorn main:app --reload
+    uvicorn manufacturer.main:app --reload
 
 Interactive docs
 ----------------
@@ -25,23 +25,57 @@ from typing import Optional
 from fastapi import Depends, FastAPI, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from database import (
-    BOMEntryRow,
-    FactoryConfigRow,
-    ManufacturingOrderRow,
-    ProductRow,
-    PurchaseOrderRow,
-    get_db,
-    init_db,
-)
-from models import (
-    ManufacturingOrder,
-    ManufacturingOrderStatus,
-    PurchaseOrder,
-    PurchaseOrderStatus,
-)
+try:
+    from manufacturer.database import (
+        BOMEntryRow,
+        FactoryConfigRow,
+        ManufacturingOrderRow,
+        OutboundPurchaseOrderRow,
+        ProductRow,
+        PurchaseOrderRow,
+        get_db,
+        init_db,
+    )
+    from manufacturer.models import (
+        ManufacturingOrder,
+        ManufacturingOrderStatus,
+        Product,
+        PurchaseOrder,
+        PurchaseOrderStatus,
+    )
+    from manufacturer.provider_integration import (
+        create_outbound_purchase,
+        fetch_supplier_catalog,
+        list_configured_suppliers,
+        list_outbound_purchase_orders,
+    )
+    from manufacturer.simulation import advance_day
+except ModuleNotFoundError:
+    from database import (
+        BOMEntryRow,
+        FactoryConfigRow,
+        ManufacturingOrderRow,
+        OutboundPurchaseOrderRow,
+        ProductRow,
+        PurchaseOrderRow,
+        get_db,
+        init_db,
+    )
+    from models import (
+        ManufacturingOrder,
+        ManufacturingOrderStatus,
+        Product,
+        PurchaseOrder,
+        PurchaseOrderStatus,
+    )
+    from provider_integration import (
+        create_outbound_purchase,
+        fetch_supplier_catalog,
+        list_configured_suppliers,
+        list_outbound_purchase_orders,
+    )
+    from simulation import advance_day
 from pydantic import BaseModel
-from simulation import advance_day
 
 
 # ---------------------------------------------------------------------------

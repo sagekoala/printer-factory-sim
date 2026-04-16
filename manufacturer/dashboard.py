@@ -11,20 +11,36 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from database import (
-    BOMEntryRow,
-    EventRow,
-    FactoryConfigRow,
-    ManufacturingOrderRow,
-    ProductRow,
-    PurchaseOrderRow,
-    SessionLocal,
-    SupplierCatalogRow,
-    SupplierRow,
-    init_db,
-)
-from models import EventType, ManufacturingOrderStatus, PurchaseOrderStatus
-from simulation import advance_day, create_purchase_order, release_manufacturing_order
+try:
+    from manufacturer.database import (
+        BOMEntryRow,
+        EventRow,
+        FactoryConfigRow,
+        ManufacturingOrderRow,
+        ProductRow,
+        PurchaseOrderRow,
+        SessionLocal,
+        SupplierCatalogRow,
+        SupplierRow,
+        init_db,
+    )
+    from manufacturer.models import EventType, ManufacturingOrderStatus, PurchaseOrderStatus
+    from manufacturer.simulation import advance_day, create_purchase_order, release_manufacturing_order
+except ModuleNotFoundError:
+    from database import (
+        BOMEntryRow,
+        EventRow,
+        FactoryConfigRow,
+        ManufacturingOrderRow,
+        ProductRow,
+        PurchaseOrderRow,
+        SessionLocal,
+        SupplierCatalogRow,
+        SupplierRow,
+        init_db,
+    )
+    from models import EventType, ManufacturingOrderStatus, PurchaseOrderStatus
+    from simulation import advance_day, create_purchase_order, release_manufacturing_order
 
 # ---------------------------------------------------------------------------
 # One-time setup

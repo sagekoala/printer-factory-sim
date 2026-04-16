@@ -4,7 +4,7 @@ Running this script multiple times is safe: existing rows (matched by primary
 key) are skipped so data is never duplicated.
 
 Usage:
-    python seed.py
+    python -m manufacturer.seed
 """
 
 from __future__ import annotations
@@ -13,15 +13,26 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
-from database import (
-    BOMEntryRow,
-    FactoryConfigRow,
-    ProductRow,
-    SessionLocal,
-    SupplierCatalogRow,
-    SupplierRow,
-    init_db,
-)
+try:
+    from manufacturer.database import (
+        BOMEntryRow,
+        FactoryConfigRow,
+        ProductRow,
+        SessionLocal,
+        SupplierCatalogRow,
+        SupplierRow,
+        init_db,
+    )
+except ModuleNotFoundError:
+    from database import (
+        BOMEntryRow,
+        FactoryConfigRow,
+        ProductRow,
+        SessionLocal,
+        SupplierCatalogRow,
+        SupplierRow,
+        init_db,
+    )
 
 SEED_FILE = Path(__file__).parent / "seed.json"
 
