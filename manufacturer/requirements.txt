@@ -6,3 +6,4 @@ sqlalchemy
 pandas
 matplotlib
 plotly
+typer
