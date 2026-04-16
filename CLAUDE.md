@@ -21,15 +21,27 @@ A discrete event simulation system that models a factory manufacturing 3D printe
 - **Global warehouse capacity**: Total inventory units across all parts cannot exceed `warehouse_capacity`
 - **Event sourcing**: All state changes recorded in EventLog for audit/history
 
-### Layer Structure
+### Repository Structure
 
 ```
-api/           # FastAPI routes (thin layer)
-services/      # Business logic (simulation, orders, inventory)
-models/        # SQLAlchemy database models
-schemas/       # Pydantic request/response models
-simpy/         # Simulation engine (SimPy processes)
-dashboard/     # Streamlit UI
+manufacturer/
+	main.py            # FastAPI app entry point
+	simulation.py      # Simulation engine / business logic
+	database.py        # SQLAlchemy engine, sessions, ORM rows
+	models.py          # Pydantic domain models
+	dashboard.py       # Streamlit dashboard
+	seed.py            # Database seeding script
+	seed.json          # Seed data
+	requirements.txt   # Python dependencies
+
+api/                 # Reserved for future router decomposition
+tests/               # Test suite
+ui/                  # UI workspace
+
+CLAUDE.md            # Project guidance
+README.md            # Setup and usage docs
+.gitignore           # Git ignore rules
+.env.example         # Example environment variables
 ```
 
 ## Data Model
@@ -67,5 +79,6 @@ dashboard/     # Streamlit UI
 
 ## Current State
 
-- PRD created at `PRD.md`
-- Project is empty — ready for Milestone 1: Foundation setup
+- Core FastAPI + SQLite simulation app lives under `manufacturer/`
+- Root-level documentation and environment scaffolding remain in place
+- Repository is prepared for future multi-app architecture expansion
