@@ -1,84 +1,137 @@
-# Project: 3D Printer Production Simulator
-
-## What This Is
-
-A discrete event simulation system that models a factory manufacturing 3D printers from raw components. The system simulates inventory management, supply chain logistics, and order fulfillment over time, creating tension between daily demand generation, inventory limits (warehouse capacity), and supplier lead times. Users manage purchasing decisions via a dashboard while SimPy drives day-by-day simulation progression.
-
-## Tech Stack
-
-- Python 3.11+
-- FastAPI + Pydantic for the REST API
-- Streamlit for the dashboard UI
-- SQLite + SQLAlchemy for persistence
-- SimPy for discrete event simulation
-- matplotlib for charts
-
-## Architecture
-
-- **Simulation runs as background process**: SimPy environment executes independently, state persisted to DB after each tick
-- **Day-based time unit**: All durations (lead times, production rates) expressed in simulation days
-- **Manual purchasing only**: No auto-reorder; planner must issue POs via UI
-- **Global warehouse capacity**: Total inventory units across all parts cannot exceed `warehouse_capacity`
-- **Event sourcing**: All state changes recorded in EventLog for audit/history
-
-### Repository Structure
-
-```
-manufacturer/
-	main.py            # FastAPI app entry point
-	simulation.py      # Simulation engine / business logic
-	database.py        # SQLAlchemy engine, sessions, ORM rows
-	models.py          # Pydantic domain models
-	dashboard.py       # Streamlit dashboard
-	seed.py            # Database seeding script
-	seed.json          # Seed data
-	requirements.txt   # Python dependencies
-
-api/                 # Reserved for future router decomposition
-tests/               # Test suite
-ui/                  # UI workspace
-
-CLAUDE.md            # Project guidance
-README.md            # Setup and usage docs
-.gitignore           # Git ignore rules
-.env.example         # Example environment variables
-```
-
-## Data Model
-
-### Core Entities
-
-| Entity | Purpose |
-|--------|---------|
-| **Supplier** | Vendor that sells parts |
-| **Part** | Component used in printer assembly |
-| **SupplierCatalog** | Pricing/availability per supplier per part (unit_price, min_order_qty, lead_time_days) |
-| **BillOfMaterial (BOM)** | Parts required to build one printer |
-| **ManufacturingOrder** | Order to assemble printers (status: pending, in_progress, completed) |
-| **PurchaseOrder** | Order to suppliers for restocking (status: pending, shipped, delivered) |
-| **InventoryTransaction** | Record of stock movements |
-| **EventLog** | Audit trail of all significant events |
-| **DailyStats** | Aggregated metrics per simulation day |
-| **FactoryConfig** | Runtime config (warehouse_capacity, capacity_per_day) |
-
-### Key Constraints
-
-- **Warehouse Capacity**: `SUM(part.current_stock * part.storage_size) <= warehouse_capacity`
-- **Production Start**: Requires sufficient BOM components; consumed immediately when MO starts
-- **Lead Time**: PO arrives exactly `lead_time_days` after creation
-
-## Coding Conventions
-
-- Use type hints everywhere
-- Pydantic models for all API request/response schemas
-- Keep API routes in separate files from business logic
-- Write docstrings for public functions
-- All configuration via environment variables or config files
-- Use UUIDs for all entity IDs
-- Separate services module for business logic (not in route handlers)
+# Project: 3D Printer Production Simulator (Week 6)
 
 ## Current State
 
-- Core FastAPI + SQLite simulation app lives under `manufacturer/`
-- Root-level documentation and environment scaffolding remain in place
-- Repository is prepared for future multi-app architecture expansion
+The repository now contains **two independent FastAPI + SQLite applications** that communicate over HTTP:
+
+- **Provider app** (`provider/`) on **port 8001**
+	- Simulates external parts suppliers and order fulfilment.
+	- Exposes supplier catalog, stock, order placement, and simulation day controls.
+	- CLI entrypoint: `provider-cli`
+
+- **Manufacturer app** (`manufacturer/`) on **port 8002**
+	- Simulates factory demand, inventory consumption, production, and local persistence.
+	- Polls provider orders and reconciles delivered quantities into local inventory.
+	- CLI entrypoint: `manufacturer-cli`
+
+## Tech Stack
+
+- Python 3.10+
+- FastAPI + Pydantic (REST APIs)
+- SQLite + SQLAlchemy (persistence)
+- Typer (CLI for both apps)
+- httpx (inter-app HTTP integration)
+- Streamlit (manufacturer dashboard)
+
+## Repository Structure
+
+```
+manufacturer/
+	main.py
+	cli.py
+	simulation.py
+	database.py
+	provider_integration.py
+	provider_config.json
+	dashboard.py
+	models.py
+	seed.py
+	seed.json
+	requirements.txt
+
+provider/
+	api.py
+	cli.py
+	db.py
+	seed-provider.json
+	requirements.txt
+	services/
+		catalog.py
+		orders.py
+		simulation.py
+
+README.md
+CLAUDE.md
+pyproject.toml
+.gitignore
+.env.example
+```
+
+## REST Contract (Manufacturer ↔ Provider)
+
+Configured in `manufacturer/provider_config.json`:
+
+```json
+{
+	"manufacturer": {
+		"port": 8002,
+		"providers": [
+			{"name": "ChipSupply Co", "url": "http://localhost:8001"}
+		]
+	}
+}
+```
+
+Manufacturer outbound calls to provider:
+
+- `GET /api/catalog` (discover products/pricing tiers)
+- `POST /api/orders` (place purchase)
+- `GET /api/orders/{id}` (poll status on each day advance)
+
+Manufacturer inbound provider-integration endpoints:
+
+- `GET /api/suppliers`
+- `GET /api/suppliers/{name}/catalog`
+- `POST /api/purchase`
+- `GET /api/purchase`
+
+## Order Lifecycle State Machines
+
+### Provider order status
+
+`pending -> confirmed -> in_progress -> shipped -> delivered`
+
+Also supported terminal states:
+
+- `rejected`
+- `cancelled`
+
+Transitions are event-logged in provider `events`.
+
+### Manufacturer outbound purchase lifecycle
+
+- Created as local `outbound_purchase_orders` row when provider `POST /api/orders` succeeds.
+- Polled each manufacturer simulation day (`advance_day`).
+- When provider status becomes `delivered`:
+	- local outbound row marked `delivered`
+	- manufacturer product stock incremented
+	- delivery event written to manufacturer `events`
+
+Provider downtime or HTTP failures are logged as `PROVIDER_SYNC_ERROR` events and surfaced to CLI/API callers.
+
+## CLI Surfaces
+
+Provider:
+
+- `provider-cli catalog`
+- `provider-cli stock`
+- `provider-cli orders list [--status X]`
+- `provider-cli orders show <id>`
+- `provider-cli price set <product> <tier> <price>`
+- `provider-cli restock <product> <quantity>`
+- `provider-cli day current`
+- `provider-cli day advance`
+- `provider-cli export`
+- `provider-cli import <file>`
+- `provider-cli serve --port 8001`
+
+Manufacturer:
+
+- `manufacturer-cli stock`
+- `manufacturer-cli orders list [--status X]`
+- `manufacturer-cli day current`
+- `manufacturer-cli day advance`
+- `manufacturer-cli suppliers list`
+- `manufacturer-cli suppliers catalog <supplier_name>`
+- `manufacturer-cli purchase create --supplier <name> --product <product_id> --qty <n>`
+- `manufacturer-cli purchase list`
