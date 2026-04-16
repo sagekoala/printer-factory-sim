@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, UTC
 from decimal import Decimal
 
 import pandas as pd
@@ -79,7 +79,7 @@ def _build_snapshot() -> str:
 
     snapshot = {
         "version": _SNAPSHOT_VERSION,
-        "exported_at": datetime.utcnow().isoformat(),
+        "exported_at": datetime.now(UTC).isoformat(),
         "data": {
             "factory_config": [
                 {"key": r.key, "value": r.value}
@@ -229,7 +229,7 @@ with st.sidebar:
     _confirm_next_day = st.checkbox("Confirm advance to next day")
     _next_day_btn = st.button(
         "Next Day ▶",
-        use_container_width=True,
+        width='stretch',
         disabled=not _confirm_next_day,
         help="Check the box above to enable this button and prevent accidental advances.",
     )
@@ -570,7 +570,7 @@ with procurement_tab:
         _df_timeline = pd.DataFrame(_timeline_rows)
         st.dataframe(
             _df_timeline,
-            use_container_width=True,
+            width='stretch',
             hide_index=True,
             column_config={
                 "Qty": st.column_config.NumberColumn(width="small"),
@@ -654,7 +654,7 @@ with orders_tab:
                     if _bom_rows:
                         st.dataframe(
                             pd.DataFrame(_bom_rows),
-                            use_container_width=True,
+                            width='stretch',
                             hide_index=True,
                             column_config={
                                 "": st.column_config.TextColumn(width="small"),
@@ -728,7 +728,7 @@ with analytics_tab:
             margin=dict(t=40, b=40),
             hovermode="x unified",
         )
-        st.plotly_chart(_fig_inv, use_container_width=True)
+        st.plotly_chart(_fig_inv, width='stretch')
 
     st.divider()
 
@@ -785,13 +785,13 @@ with analytics_tab:
             yaxis_title="Avg Lead Time (days)",
             margin=dict(t=60, b=40),
         )
-        st.plotly_chart(_fig_lt, use_container_width=True)
+        st.plotly_chart(_fig_lt, width='stretch')
 
         # Per-part detail table as supporting data
         with st.expander("Per-part supplier detail"):
             st.dataframe(
                 _df_lt.sort_values(["Part", "Lead Time (days)"]),
-                use_container_width=True,
+                width='stretch',
                 hide_index=True,
             )
 
@@ -856,7 +856,7 @@ with analytics_tab:
             hovermode="x unified",
             margin=dict(t=40, b=40),
         )
-        st.plotly_chart(_fig_prod, use_container_width=True)
+        st.plotly_chart(_fig_prod, width='stretch')
 
 # ── System tab ───────────────────────────────────────────────────────────────
 
@@ -870,7 +870,7 @@ with system_tab:
     )
 
     snapshot_json = _build_snapshot()
-    export_filename = f"factory_snapshot_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json"
+    export_filename = f"factory_snapshot_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}.json"
     st.download_button(
         label="Download Snapshot",
         data=snapshot_json,
