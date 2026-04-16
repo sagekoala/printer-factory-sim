@@ -38,6 +38,7 @@ from __future__ import annotations
 import random
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
@@ -50,6 +51,7 @@ try:
         ProductRow,
         PurchaseOrderRow,
         SupplierCatalogRow,
+        SupplierRow,
     )
     from manufacturer.models import EventType, ManufacturingOrderStatus, PurchaseOrderStatus
 except ModuleNotFoundError:
@@ -234,6 +236,190 @@ def release_manufacturing_order(
     )
     db.commit()
     return True, ""
+
+
+def export_state(db: Session) -> dict:
+    """Export the full simulation state as a serializable snapshot dict."""
+    def _dt(d: datetime | None) -> str | None:
+        return d.isoformat() if d else None
+
+    return {
+        "version": "1.0",
+        "exported_at": datetime.utcnow().isoformat(),
+        "data": {
+            "factory_config": [
+                {"key": r.key, "value": r.value}
+                for r in db.query(FactoryConfigRow).all()
+            ],
+            "suppliers": [
+                {"id": r.id, "name": r.name, "contact_email": r.contact_email}
+                for r in db.query(SupplierRow).all()
+            ],
+            "products": [
+                {
+                    "id": r.id,
+                    "name": r.name,
+                    "current_stock": r.current_stock,
+                    "storage_size": r.storage_size,
+                }
+                for r in db.query(ProductRow).all()
+            ],
+            "supplier_catalog": [
+                {
+                    "id": r.id,
+                    "supplier_id": r.supplier_id,
+                    "part_id": r.part_id,
+                    "unit_price": str(r.unit_price),
+                    "min_order_qty": r.min_order_qty,
+                    "lead_time_days": r.lead_time_days,
+                }
+                for r in db.query(SupplierCatalogRow).all()
+            ],
+            "bom_entries": [
+                {"id": r.id, "part_id": r.part_id, "quantity_per_unit": r.quantity_per_unit}
+                for r in db.query(BOMEntryRow).all()
+            ],
+            "manufacturing_orders": [
+                {
+                    "id": r.id,
+                    "quantity": r.quantity,
+                    "status": r.status,
+                    "created_at": _dt(r.created_at),
+                    "started_at": _dt(r.started_at),
+                    "completed_at": _dt(r.completed_at),
+                    "days_elapsed": r.days_elapsed,
+                }
+                for r in db.query(ManufacturingOrderRow).all()
+            ],
+            "purchase_orders": [
+                {
+                    "id": r.id,
+                    "part_id": r.part_id,
+                    "supplier_id": r.supplier_id,
+                    "quantity": r.quantity,
+                    "unit_price": str(r.unit_price),
+                    "status": r.status,
+                    "created_at": _dt(r.created_at),
+                    "ship_date": _dt(r.ship_date),
+                    "delivered_at": _dt(r.delivered_at),
+                    "lead_time_remaining": r.lead_time_remaining,
+                }
+                for r in db.query(PurchaseOrderRow).all()
+            ],
+            "events": [
+                {
+                    "id": r.id,
+                    "day": r.day,
+                    "event_type": r.event_type,
+                    "entity_type": r.entity_type,
+                    "entity_id": r.entity_id,
+                    "description": r.description,
+                    "event_metadata": r.event_metadata,
+                }
+                for r in db.query(EventRow).all()
+            ],
+        },
+    }
+
+
+def import_state(db: Session, snapshot: dict) -> None:
+    """Replace the full simulation state from a previously exported snapshot."""
+    required_tables = {
+        "factory_config",
+        "suppliers",
+        "products",
+        "supplier_catalog",
+        "bom_entries",
+        "manufacturing_orders",
+        "purchase_orders",
+        "events",
+    }
+    data = snapshot.get("data", {})
+    missing = required_tables - set(data.keys())
+    if missing:
+        raise ValueError(f"Snapshot is missing required table(s): {sorted(missing)}")
+
+    def _dt(s: str | None) -> datetime | None:
+        return datetime.fromisoformat(s) if s else None
+
+    db.query(EventRow).delete()
+    db.query(PurchaseOrderRow).delete()
+    db.query(ManufacturingOrderRow).delete()
+    db.query(SupplierCatalogRow).delete()
+    db.query(BOMEntryRow).delete()
+    db.query(ProductRow).delete()
+    db.query(SupplierRow).delete()
+    db.query(FactoryConfigRow).delete()
+    db.flush()
+
+    for r in data["factory_config"]:
+        db.add(FactoryConfigRow(key=r["key"], value=r["value"]))
+
+    for r in data["suppliers"]:
+        db.add(SupplierRow(id=r["id"], name=r["name"], contact_email=r.get("contact_email")))
+
+    for r in data["products"]:
+        db.add(ProductRow(
+            id=r["id"],
+            name=r["name"],
+            current_stock=r["current_stock"],
+            storage_size=r["storage_size"],
+        ))
+
+    for r in data["supplier_catalog"]:
+        db.add(SupplierCatalogRow(
+            id=r["id"],
+            supplier_id=r["supplier_id"],
+            part_id=r["part_id"],
+            unit_price=Decimal(r["unit_price"]),
+            min_order_qty=r["min_order_qty"],
+            lead_time_days=r["lead_time_days"],
+        ))
+
+    for r in data["bom_entries"]:
+        db.add(BOMEntryRow(
+            id=r["id"],
+            part_id=r["part_id"],
+            quantity_per_unit=r["quantity_per_unit"],
+        ))
+
+    for r in data["manufacturing_orders"]:
+        db.add(ManufacturingOrderRow(
+            id=r["id"],
+            quantity=r["quantity"],
+            status=r["status"],
+            created_at=_dt(r.get("created_at")),
+            started_at=_dt(r.get("started_at")),
+            completed_at=_dt(r.get("completed_at")),
+            days_elapsed=r.get("days_elapsed"),
+        ))
+
+    for r in data["purchase_orders"]:
+        db.add(PurchaseOrderRow(
+            id=r["id"],
+            part_id=r["part_id"],
+            supplier_id=r["supplier_id"],
+            quantity=r["quantity"],
+            unit_price=Decimal(r["unit_price"]),
+            status=r["status"],
+            created_at=_dt(r.get("created_at")),
+            ship_date=_dt(r.get("ship_date")),
+            delivered_at=_dt(r.get("delivered_at")),
+            lead_time_remaining=r.get("lead_time_remaining"),
+        ))
+
+    for r in data["events"]:
+        db.add(EventRow(
+            id=r["id"],
+            day=r["day"],
+            event_type=r["event_type"],
+            entity_type=r["entity_type"],
+            entity_id=r["entity_id"],
+            description=r["description"],
+            event_metadata=r.get("event_metadata"),
+        ))
+
+    db.commit()
 
 
 # ---------------------------------------------------------------------------

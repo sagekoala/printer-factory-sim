@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "manufacturer-sim"
+version = "0.1.0"
+description = "3D Printer manufacturer simulation"
+requires-python = ">=3.10"
+dependencies = [
+  "fastapi",
+  "uvicorn[standard]",
+  "pydantic",
+  "streamlit",
+  "sqlalchemy",
+  "pandas",
+  "matplotlib",
+  "typer",
+]
+
+[project.scripts]
+manufacturer-cli = "manufacturer.cli:main"
+
+[tool.setuptools]
+packages = ["manufacturer"]
