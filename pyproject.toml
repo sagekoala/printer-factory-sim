@@ -20,6 +20,7 @@ dependencies = [
 
 [project.scripts]
 manufacturer-cli = "manufacturer.cli:main"
+provider-cli = "provider.cli:main"
 
 [tool.setuptools]
-packages = ["manufacturer"]
+packages = ["manufacturer", "provider"]

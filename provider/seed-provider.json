@@ -1,0 +1,65 @@
+{
+  "products": [
+    {
+      "id": "p-0001",
+      "name": "PCB",
+      "description": "Printed circuit board for controller assembly",
+      "lead_time_days": 3
+    },
+    {
+      "id": "p-0002",
+      "name": "Extruder",
+      "description": "Extrusion assembly for filament feed",
+      "lead_time_days": 7
+    },
+    {
+      "id": "p-0003",
+      "name": "Cable",
+      "description": "Wiring harness and cable set",
+      "lead_time_days": 2
+    },
+    {
+      "id": "p-0004",
+      "name": "Frame",
+      "description": "Chassis frame structure",
+      "lead_time_days": 10
+    },
+    {
+      "id": "p-0005",
+      "name": "Stepper Motor",
+      "description": "Stepper motor for axis movement",
+      "lead_time_days": 5
+    }
+  ],
+  "pricing_tiers": [
+    {"id": "t-0001", "product_id": "p-0001", "min_quantity": 1, "unit_price": "55.00"},
+    {"id": "t-0002", "product_id": "p-0001", "min_quantity": 10, "unit_price": "45.00"},
+    {"id": "t-0003", "product_id": "p-0001", "min_quantity": 50, "unit_price": "41.00"},
+
+    {"id": "t-0004", "product_id": "p-0002", "min_quantity": 1, "unit_price": "138.00"},
+    {"id": "t-0005", "product_id": "p-0002", "min_quantity": 5, "unit_price": "120.00"},
+    {"id": "t-0006", "product_id": "p-0002", "min_quantity": 25, "unit_price": "112.00"},
+
+    {"id": "t-0007", "product_id": "p-0003", "min_quantity": 1, "unit_price": "3.20"},
+    {"id": "t-0008", "product_id": "p-0003", "min_quantity": 50, "unit_price": "2.50"},
+    {"id": "t-0009", "product_id": "p-0003", "min_quantity": 200, "unit_price": "2.20"},
+
+    {"id": "t-0010", "product_id": "p-0004", "min_quantity": 1, "unit_price": "95.00"},
+    {"id": "t-0011", "product_id": "p-0004", "min_quantity": 5, "unit_price": "85.00"},
+    {"id": "t-0012", "product_id": "p-0004", "min_quantity": 20, "unit_price": "78.00"},
+
+    {"id": "t-0013", "product_id": "p-0005", "min_quantity": 1, "unit_price": "42.00"},
+    {"id": "t-0014", "product_id": "p-0005", "min_quantity": 10, "unit_price": "35.00"},
+    {"id": "t-0015", "product_id": "p-0005", "min_quantity": 40, "unit_price": "32.00"}
+  ],
+  "stock": [
+    {"product_id": "p-0001", "quantity": 1000},
+    {"product_id": "p-0002", "quantity": 600},
+    {"product_id": "p-0003", "quantity": 5000},
+    {"product_id": "p-0004", "quantity": 450},
+    {"product_id": "p-0005", "quantity": 1200}
+  ],
+  "sim_state": {
+    "current_day": 0
+  }
+}
