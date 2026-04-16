@@ -7,7 +7,7 @@ call a service function, and serialise the result.
 
 Start the server
 ----------------
-    uvicorn main:app --reload
+    uvicorn manufacturer.main:app --reload
 
 Interactive docs
 ----------------
@@ -25,23 +25,41 @@ from typing import Optional
 from fastapi import Depends, FastAPI, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from database import (
-    FactoryConfigRow,
-    ManufacturingOrderRow,
-    ProductRow,
-    PurchaseOrderRow,
-    get_db,
-    init_db,
-)
-from models import (
-    ManufacturingOrder,
-    ManufacturingOrderStatus,
-    Product,
-    PurchaseOrder,
-    PurchaseOrderStatus,
-)
+try:
+    from manufacturer.database import (
+        FactoryConfigRow,
+        ManufacturingOrderRow,
+        ProductRow,
+        PurchaseOrderRow,
+        get_db,
+        init_db,
+    )
+    from manufacturer.models import (
+        ManufacturingOrder,
+        ManufacturingOrderStatus,
+        Product,
+        PurchaseOrder,
+        PurchaseOrderStatus,
+    )
+    from manufacturer.simulation import advance_day
+except ModuleNotFoundError:
+    from database import (
+        FactoryConfigRow,
+        ManufacturingOrderRow,
+        ProductRow,
+        PurchaseOrderRow,
+        get_db,
+        init_db,
+    )
+    from models import (
+        ManufacturingOrder,
+        ManufacturingOrderStatus,
+        Product,
+        PurchaseOrder,
+        PurchaseOrderStatus,
+    )
+    from simulation import advance_day
 from pydantic import BaseModel
-from simulation import advance_day
 
 
 # ---------------------------------------------------------------------------

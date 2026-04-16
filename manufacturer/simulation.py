@@ -41,16 +41,28 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-from database import (
-    BOMEntryRow,
-    EventRow,
-    FactoryConfigRow,
-    ManufacturingOrderRow,
-    ProductRow,
-    PurchaseOrderRow,
-    SupplierCatalogRow,
-)
-from models import EventType, ManufacturingOrderStatus, PurchaseOrderStatus
+try:
+    from manufacturer.database import (
+        BOMEntryRow,
+        EventRow,
+        FactoryConfigRow,
+        ManufacturingOrderRow,
+        ProductRow,
+        PurchaseOrderRow,
+        SupplierCatalogRow,
+    )
+    from manufacturer.models import EventType, ManufacturingOrderStatus, PurchaseOrderStatus
+except ModuleNotFoundError:
+    from database import (
+        BOMEntryRow,
+        EventRow,
+        FactoryConfigRow,
+        ManufacturingOrderRow,
+        ProductRow,
+        PurchaseOrderRow,
+        SupplierCatalogRow,
+    )
+    from models import EventType, ManufacturingOrderStatus, PurchaseOrderStatus
 
 # ---------------------------------------------------------------------------
 # Constants (all overridable via factory_config table)
