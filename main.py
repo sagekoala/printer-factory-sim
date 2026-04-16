@@ -26,6 +26,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from database import (
+    BOMEntryRow,
     FactoryConfigRow,
     ManufacturingOrderRow,
     ProductRow,
@@ -36,7 +37,6 @@ from database import (
 from models import (
     ManufacturingOrder,
     ManufacturingOrderStatus,
-    Product,
     PurchaseOrder,
     PurchaseOrderStatus,
 )
@@ -92,22 +92,53 @@ class AdvanceDayResponse(BaseModel):
     current_day: int
 
 
+class InventoryItem(BaseModel):
+    """Per-part inventory snapshot with derived planning fields.
+
+    - **committed**: units reserved by pending manufacturing orders (not yet
+      consumed from stock).
+    - **in_transit**: units on open (pending/shipped) purchase orders not yet
+      delivered to the warehouse.
+    - **deficit**: units short relative to committed demand
+      (``max(0, committed - current_stock)``).
+    """
+
+    id: uuid.UUID
+    name: str
+    current_stock: int
+    storage_size: int
+    committed: int
+    in_transit: int
+    deficit: int
+
+
 # ---------------------------------------------------------------------------
 # ORM-row → Pydantic mappers
 # ---------------------------------------------------------------------------
 
 
-def _map_product(row: ProductRow) -> Product:
-    """Convert a :class:`~database.ProductRow` ORM object to a :class:`~models.Product`.
+def _build_inventory_item(
+    row: ProductRow,
+    committed_by_part: dict[str, int],
+    in_transit_by_part: dict[str, int],
+) -> InventoryItem:
+    """Build an :class:`InventoryItem` from a product row and pre-computed dicts.
 
-    String IDs stored in SQLite are cast back to ``uuid.UUID`` so the Pydantic
-    model's type contract is satisfied.
+    ``committed_by_part`` maps part ID → units required by pending MOs.
+    ``in_transit_by_part`` maps part ID → units on open (pending/shipped) POs.
+    ``deficit`` is the shortfall of on-hand stock against committed demand.
     """
-    return Product(
+    committed = committed_by_part.get(row.id, 0)
+    in_transit = in_transit_by_part.get(row.id, 0)
+    deficit = max(0, committed - row.current_stock)
+    return InventoryItem(
         id=uuid.UUID(row.id),
         name=row.name,
         current_stock=row.current_stock,
         storage_size=row.storage_size,
+        committed=committed,
+        in_transit=in_transit,
+        deficit=deficit,
     )
 
 
@@ -135,6 +166,8 @@ def _map_purchase_order(row: PurchaseOrderRow) -> PurchaseOrder:
     string by some drivers; wrapping it in ``Decimal(str(...))`` normalises this
     before Pydantic validates the field.
     """
+    active_statuses = {PurchaseOrderStatus.pending.value, PurchaseOrderStatus.shipped.value}
+    days_to_arrival = row.lead_time_remaining if row.status in active_statuses else None
     return PurchaseOrder(
         id=uuid.UUID(row.id),
         part_id=uuid.UUID(row.part_id),
@@ -146,6 +179,7 @@ def _map_purchase_order(row: PurchaseOrderRow) -> PurchaseOrder:
         ship_date=row.ship_date,
         delivered_at=row.delivered_at,
         lead_time_remaining=row.lead_time_remaining,
+        days_to_arrival=days_to_arrival,
     )
 
 
@@ -170,18 +204,60 @@ def health() -> dict[str, str]:
 
 @app.get(
     "/inventory",
-    response_model=list[Product],
+    response_model=list[InventoryItem],
     tags=["Inventory"],
 )
-def get_inventory(db: Session = Depends(get_db)) -> list[Product]:
-    """Return all parts and their current on-hand stock levels.
+def get_inventory(db: Session = Depends(get_db)) -> list[InventoryItem]:
+    """Return all parts with on-hand stock and derived planning fields.
 
-    Each entry includes the part's unique ID, name, current stock quantity,
-    and the storage-space size it consumes per unit in the warehouse.
+    Each entry includes:
+
+    - **current_stock**: units physically in the warehouse right now.
+    - **committed**: units required by *pending* manufacturing orders (BOM
+      quantity × order quantity, summed across all pending MOs).
+    - **in_transit**: units on open purchase orders (``pending`` or
+      ``shipped``) not yet delivered.
+    - **deficit**: units short of committed demand (``max(0, committed −
+      current_stock)``).
+
     Results are sorted alphabetically by part name.
     """
     rows = db.query(ProductRow).order_by(ProductRow.name).all()
-    return [_map_product(r) for r in rows]
+
+    # BOM lookup: part_id → units required per printer
+    bom_entries = db.query(BOMEntryRow).all()
+    bom_by_part: dict[str, int] = {e.part_id: e.quantity_per_unit for e in bom_entries}
+
+    # Committed: sum BOM requirements across all pending MOs
+    pending_mos = (
+        db.query(ManufacturingOrderRow)
+        .filter(ManufacturingOrderRow.status == ManufacturingOrderStatus.pending.value)
+        .all()
+    )
+    committed_by_part: dict[str, int] = {}
+    for mo in pending_mos:
+        for part_id, qty_per_unit in bom_by_part.items():
+            committed_by_part[part_id] = (
+                committed_by_part.get(part_id, 0) + qty_per_unit * mo.quantity
+            )
+
+    # In-transit: sum quantities on open POs not yet delivered
+    active_pos = (
+        db.query(PurchaseOrderRow)
+        .filter(
+            PurchaseOrderRow.status.in_(
+                [PurchaseOrderStatus.pending.value, PurchaseOrderStatus.shipped.value]
+            )
+        )
+        .all()
+    )
+    in_transit_by_part: dict[str, int] = {}
+    for po in active_pos:
+        in_transit_by_part[po.part_id] = (
+            in_transit_by_part.get(po.part_id, 0) + po.quantity
+        )
+
+    return [_build_inventory_item(r, committed_by_part, in_transit_by_part) for r in rows]
 
 
 # ---------------------------------------------------------------------------

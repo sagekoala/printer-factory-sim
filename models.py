@@ -142,6 +142,7 @@ class PurchaseOrder(BaseModel):
     ship_date: Optional[datetime] = None
     delivered_at: Optional[datetime] = None
     lead_time_remaining: Optional[int] = None
+    days_to_arrival: Optional[int] = None
 
 
 class Inventory(BaseModel):

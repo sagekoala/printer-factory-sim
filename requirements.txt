@@ -5,3 +5,4 @@ streamlit
 sqlalchemy
 pandas
 matplotlib
+plotly

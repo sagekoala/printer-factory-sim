@@ -6,8 +6,9 @@ import json
 from datetime import datetime
 from decimal import Decimal
 
-import matplotlib.pyplot as plt
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from database import (
@@ -22,7 +23,7 @@ from database import (
     SupplierRow,
     init_db,
 )
-from models import EventType, ManufacturingOrderStatus
+from models import EventType, ManufacturingOrderStatus, PurchaseOrderStatus
 from simulation import advance_day, create_purchase_order, release_manufacturing_order
 
 # ---------------------------------------------------------------------------
@@ -225,13 +226,27 @@ with st.sidebar:
     db.expire_all()
     st.metric("Current Day", _current_day())
 
-    if st.button("Next Day ▶", use_container_width=True):
+    _confirm_next_day = st.checkbox("Confirm advance to next day")
+    _next_day_btn = st.button(
+        "Next Day ▶",
+        use_container_width=True,
+        disabled=not _confirm_next_day,
+        help="Check the box above to enable this button and prevent accidental advances.",
+    )
+    if _next_day_btn and _confirm_next_day:
         advance_day(db)
         db.expire_all()
         st.rerun()
 
     st.divider()
-    st.caption("Press 'Next Day' to advance the simulation by one day.")
+    st.caption("Check the box to confirm before advancing. This cannot be undone.")
+
+    # --- Snapshot reminder ---
+    st.info(
+        "💾 **Save point tip:** Use **Export JSON** in the System tab to create a "
+        "snapshot you can restore later.",
+        icon=None,
+    )
 
     # --- Factory Log (last 3 events) ---
     st.divider()
@@ -255,7 +270,39 @@ with st.sidebar:
 
 st.title("3D Printer Production Simulator")
 db.expire_all()
-st.subheader(f"Day {_current_day()}")
+current_day = _current_day()
+st.subheader(f"Day {current_day}")
+
+# ---------------------------------------------------------------------------
+# Shared data used across multiple tabs
+# ---------------------------------------------------------------------------
+
+all_parts = db.query(ProductRow).order_by(ProductRow.name).all()
+parts_by_id: dict[str, ProductRow] = {p.id: p for p in all_parts}
+
+_bom_entries = db.query(BOMEntryRow).all()
+
+# Active (non-delivered, non-cancelled) POs
+_active_po_statuses = [PurchaseOrderStatus.pending.value, PurchaseOrderStatus.shipped.value]
+_active_pos = (
+    db.query(PurchaseOrderRow)
+    .filter(PurchaseOrderRow.status.in_(_active_po_statuses))
+    .all()
+)
+
+# Units committed to pending manufacturing orders (per part)
+_pending_mos = (
+    db.query(ManufacturingOrderRow)
+    .filter(ManufacturingOrderRow.status == ManufacturingOrderStatus.pending.value)
+    .all()
+)
+committed_by_part: dict[str, int] = {}
+for _mo in _pending_mos:
+    for _entry in _bom_entries:
+        committed_by_part[_entry.part_id] = (
+            committed_by_part.get(_entry.part_id, 0)
+            + _entry.quantity_per_unit * _mo.quantity
+        )
 
 # ---------------------------------------------------------------------------
 # Top-level metrics (always visible)
@@ -266,26 +313,41 @@ completed_printers = (
     .filter(ManufacturingOrderRow.status == ManufacturingOrderStatus.completed.value)
     .count()
 )
-pending_orders = (
-    db.query(ManufacturingOrderRow)
-    .filter(ManufacturingOrderRow.status == ManufacturingOrderStatus.pending.value)
-    .count()
-)
-all_parts = db.query(ProductRow).all()
-current_stock_level = sum(p.current_stock for p in all_parts)
+pending_orders_count = len(_pending_mos)
 
-col1, col2, col3 = st.columns(3)
+# On Hand = physical stock; Committed = reserved for pending MOs
+total_on_hand = sum(p.current_stock for p in all_parts)
+total_committed = sum(committed_by_part.values())
+total_available = total_on_hand - total_committed
+
+col1, col2, col3, col4 = st.columns(4)
 col1.metric("Total Completed Printers", completed_printers)
-col2.metric("Pending Orders", pending_orders)
-col3.metric("Current Stock Level", current_stock_level, help="Total units across all parts")
+col2.metric("Pending Orders", pending_orders_count)
+col3.metric(
+    "Stock — On Hand",
+    total_on_hand,
+    help="Physical units currently in the warehouse across all parts.",
+)
+col4.metric(
+    "Net Inventory Position",
+    total_available,
+    delta=f"-{total_committed} committed" if total_committed else None,
+    delta_color="off",
+    help=(
+        "Physical stock minus total parts committed to all pending orders. "
+        "A negative value indicates the total shortage across your entire backlog."
+    ),
+)
 
 st.divider()
 
 # ---------------------------------------------------------------------------
-# Tabs — Overview | Orders
+# Tabs
 # ---------------------------------------------------------------------------
 
-overview_tab, orders_tab, analytics_tab, system_tab = st.tabs(["Overview", "Orders", "Analytics", "System"])
+overview_tab, procurement_tab, orders_tab, analytics_tab, system_tab = st.tabs(
+    ["Overview", "Procurement Tracker", "Orders", "Analytics", "System"]
+)
 
 # ── Overview tab ────────────────────────────────────────────────────────────
 
@@ -293,11 +355,54 @@ with overview_tab:
 
     # --- Inventory Status ---
     st.subheader("Inventory Status")
-    parts = db.query(ProductRow).order_by(ProductRow.name).all()
-    if parts:
-        st.table(pd.DataFrame(
-            [{"Part Name": p.name, "Current Stock": p.current_stock} for p in parts]
-        ))
+
+    # Units in transit per part
+    _pending_arrival: dict[str, int] = {}
+    for _po in _active_pos:
+        _pending_arrival[_po.part_id] = _pending_arrival.get(_po.part_id, 0) + _po.quantity
+
+    if all_parts:
+        _table_header = (
+            "<table style='width:100%;border-collapse:collapse;font-size:0.9rem'>"
+            "<thead><tr style='border-bottom:2px solid #ccc'>"
+            "<th style='text-align:left;padding:6px 10px'>Part Name</th>"
+            "<th style='text-align:right;padding:6px 10px'"
+            " title='Physical units currently in the warehouse'>On Hand</th>"
+            "<th style='text-align:right;padding:6px 10px'"
+            " title='Units reserved for pending manufacturing orders'>Committed</th>"
+            "<th style='text-align:right;padding:6px 10px'"
+            " title='Units on active purchase orders not yet delivered'>In Transit</th>"
+            "<th style='text-align:right;padding:6px 10px'"
+            " title='Committed − On Hand − In Transit. Order this quantity to cover your backlog.'>"
+            "Deficit (Need to Order)</th>"
+            "</tr></thead><tbody>"
+        )
+        _table_rows = ""
+        for p in all_parts:
+            _on_hand = p.current_stock
+            _committed = committed_by_part.get(p.id, 0)
+            _in_transit = _pending_arrival.get(p.id, 0)
+            _deficit = _committed - _on_hand - _in_transit
+            if _deficit > 0:
+                _deficit_cell = (
+                    f'<td style="text-align:right;padding:6px 10px;'
+                    f'color:#c0392b;font-weight:bold">{_deficit}</td>'
+                )
+            else:
+                _deficit_cell = '<td style="text-align:right;padding:6px 10px">✅ OK</td>'
+            _table_rows += (
+                f"<tr style='border-bottom:1px solid #eee'>"
+                f"<td style='padding:6px 10px'>{p.name}</td>"
+                f"<td style='text-align:right;padding:6px 10px'>{_on_hand}</td>"
+                f"<td style='text-align:right;padding:6px 10px'>{_committed}</td>"
+                f"<td style='text-align:right;padding:6px 10px'>{_in_transit}</td>"
+                f"{_deficit_cell}"
+                f"</tr>"
+            )
+        st.markdown(
+            _table_header + _table_rows + "</tbody></table>",
+            unsafe_allow_html=True,
+        )
     else:
         st.info("No parts found. Run `python seed.py` to load initial data.")
 
@@ -307,7 +412,6 @@ with overview_tab:
     st.subheader("Procurement")
     st.caption("Place a purchase order to restock a part from a supplier.")
 
-    # Parts that appear in at least one catalog entry
     parts_with_suppliers = (
         db.query(ProductRow)
         .join(SupplierCatalogRow, SupplierCatalogRow.part_id == ProductRow.id)
@@ -325,7 +429,6 @@ with overview_tab:
             format_func=lambda p: p.name,
         )
 
-        # Catalog entries for the chosen part (with supplier name)
         catalog_entries = (
             db.query(SupplierCatalogRow, SupplierRow)
             .join(SupplierRow, SupplierCatalogRow.supplier_id == SupplierRow.id)
@@ -395,93 +498,308 @@ with overview_tab:
     else:
         st.info("No events yet. Click 'Next Day' to start the simulation.")
 
+# ── Procurement Tracker tab ──────────────────────────────────────────────────
+
+with procurement_tab:
+    st.subheader("Procurement Tracker")
+    st.caption("Live view of all purchase orders that have not yet been delivered.")
+
+    # Build supplier lookup
+    _suppliers_by_id: dict[str, SupplierRow] = {
+        s.id: s for s in db.query(SupplierRow).all()
+    }
+
+    if not _active_pos:
+        st.info("No active purchase orders. Place a PO from the Overview tab.")
+    else:
+        # ── Summary: total units in transit per part ─────────────────────────
+        st.markdown("#### Parts in Transit")
+
+        # Group: part_id → list of (qty, lead_time_remaining)
+        _transit_by_part: dict[str, list[tuple[int, int | None]]] = {}
+        for _po in _active_pos:
+            _transit_by_part.setdefault(_po.part_id, []).append(
+                (_po.quantity, _po.lead_time_remaining)
+            )
+
+        _summary_cols = st.columns(min(len(_transit_by_part), 4))
+        for _col, (_pid, _entries) in zip(_summary_cols, _transit_by_part.items()):
+            _total_qty = sum(q for q, _ in _entries)
+            _remaining_days = [d for _, d in _entries if d is not None]
+            _earliest = min(_remaining_days) if _remaining_days else None
+            _part_name = parts_by_id[_pid].name if _pid in parts_by_id else _pid[:8]
+            _arrival_str = f"earliest in {_earliest}d" if _earliest is not None else "arrival unknown"
+            _col.metric(
+                label=_part_name,
+                value=f"{_total_qty} units",
+                delta=_arrival_str,
+                delta_color="off",
+            )
+
+        st.divider()
+
+        # ── Shipment Timeline table ──────────────────────────────────────────
+        st.markdown("#### Shipment Timeline")
+
+        _timeline_rows = []
+        for _po in sorted(_active_pos, key=lambda p: p.lead_time_remaining or 9999):
+            _part = parts_by_id.get(_po.part_id)
+            _supplier = _suppliers_by_id.get(_po.supplier_id)
+            _days_left = _po.lead_time_remaining
+
+            # Arrival urgency label
+            if _days_left is None:
+                _urgency = "—"
+            elif _days_left <= 1:
+                _urgency = "🔴 Tomorrow"
+            elif _days_left <= 4:
+                _urgency = f"🟠 {_days_left}d"
+            else:
+                _urgency = f"🟢 {_days_left}d"
+
+            _timeline_rows.append({
+                "PO ID": _po.id[:8] + "…",
+                "Part": _part.name if _part else "Unknown",
+                "Supplier": _supplier.name if _supplier else "Unknown",
+                "Status": _po.status.capitalize(),
+                "Qty": _po.quantity,
+                "Days to Arrival": _days_left if _days_left is not None else "—",
+                "Urgency": _urgency,
+            })
+
+        _df_timeline = pd.DataFrame(_timeline_rows)
+        st.dataframe(
+            _df_timeline,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Qty": st.column_config.NumberColumn(width="small"),
+                "Days to Arrival": st.column_config.NumberColumn(
+                    help="Simulation days until this shipment lands in the warehouse (R4)",
+                    width="medium",
+                ),
+                "Urgency": st.column_config.TextColumn(
+                    help="🔴 = arrives tomorrow, 🟠 = 2–4 days, 🟢 = 5+ days",
+                    width="medium",
+                ),
+            },
+        )
+
 # ── Orders tab ──────────────────────────────────────────────────────────────
 
 with orders_tab:
-    st.subheader("Pending Manufacturing Orders")
-    st.caption(
-        "Click **Release for Production** to immediately build the order if "
-        "sufficient parts are in stock."
-    )
+    st.subheader("Manufacturing Orders")
 
-    pending_mos = (
+    # ── In-Progress ──────────────────────────────────────────────────────────
+    in_progress_mos = (
         db.query(ManufacturingOrderRow)
-        .filter(ManufacturingOrderRow.status == ManufacturingOrderStatus.pending.value)
-        .order_by(ManufacturingOrderRow.created_at)
+        .filter(ManufacturingOrderRow.status == ManufacturingOrderStatus.in_progress.value)
+        .order_by(ManufacturingOrderRow.started_at)
         .all()
     )
+    if in_progress_mos:
+        st.markdown("**In Progress**")
+        total_in_progress = sum(mo.quantity for mo in in_progress_mos)
+        st.info(f"{len(in_progress_mos)} order(s) · {total_in_progress} printer(s) currently being built.")
 
-    if not pending_mos:
+    # ── Pending — summary grouped by quantity ────────────────────────────────
+    st.markdown("**Pending Orders**")
+    st.caption(
+        "Click **Release for Production** inside each order to build it immediately "
+        "if sufficient parts are available."
+    )
+
+    if not _pending_mos:
         st.info("No pending manufacturing orders.")
     else:
-        # Header row
-        hcols = st.columns([2, 1, 3, 2])
-        hcols[0].markdown("**Order ID**")
-        hcols[1].markdown("**Qty**")
-        hcols[2].markdown("**Created**")
-        hcols[3].markdown("**Action**")
-        st.divider()
+        # Group pending MOs by quantity (proxy for 'model' since the simulator
+        # has a single product type; expander shows BOM detail per order).
+        _qty_groups: dict[int, list[ManufacturingOrderRow]] = {}
+        for _mo in _pending_mos:
+            _qty_groups.setdefault(_mo.quantity, []).append(_mo)
 
-        for mo in pending_mos:
-            row = st.columns([2, 1, 3, 2])
-            row[0].text(mo.id[:8] + "…")
-            row[1].text(mo.quantity)
-            row[2].text(str(mo.created_at)[:19] if mo.created_at else "—")
+        for _qty, _group in sorted(_qty_groups.items()):
+            _group_total = sum(m.quantity for m in _group)
+            with st.expander(
+                f"{len(_group)}x order(s) for **{_qty} printer(s)** each "
+                f"— {_group_total} printers total",
+                expanded=False,
+            ):
+                for _mo in _group:
+                    st.markdown(
+                        f"**Order** `{_mo.id[:8]}…`  |  "
+                        f"Created: {str(_mo.created_at)[:10] if _mo.created_at else '—'}"
+                    )
 
-            if row[3].button("Release for Production", key=f"release_{mo.id}"):
-                ok, err = release_manufacturing_order(db, mo.id)
-                db.expire_all()
-                if ok:
-                    st.success(f"Order {mo.id[:8]}… completed successfully.")
-                else:
-                    st.error(f"Could not release order: {err}")
-                st.rerun()
+                    # BOM breakdown
+                    _bom_rows = []
+                    _all_satisfied = True
+                    for _entry in _bom_entries:
+                        _part = parts_by_id.get(_entry.part_id)
+                        if _part is None:
+                            continue
+                        _needed = _entry.quantity_per_unit * _mo.quantity
+                        _on_hand = _part.current_stock
+                        _ok = _on_hand >= _needed
+                        if not _ok:
+                            _all_satisfied = False
+                        _bom_rows.append({
+                            "": "✅" if _ok else "❌",
+                            "Part": _part.name,
+                            "Required": _needed,
+                            "On Hand": _on_hand,
+                            "Shortage": max(0, _needed - _on_hand),
+                        })
+
+                    if _bom_rows:
+                        st.dataframe(
+                            pd.DataFrame(_bom_rows),
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "": st.column_config.TextColumn(width="small"),
+                                "Shortage": st.column_config.NumberColumn(
+                                    help="Units still needed to fulfil this order"
+                                ),
+                            },
+                        )
+                        if not _all_satisfied:
+                            st.warning(
+                                "Insufficient stock — place purchase orders or wait for arrivals.",
+                                icon=None,
+                            )
+
+                    if st.button(
+                        "Release for Production",
+                        key=f"release_{_mo.id}",
+                        type="primary",
+                        disabled=not _all_satisfied,
+                    ):
+                        ok, err = release_manufacturing_order(db, _mo.id)
+                        db.expire_all()
+                        if ok:
+                            st.success(f"Order {_mo.id[:8]}… completed successfully.")
+                        else:
+                            st.error(f"Could not release order: {err}")
+                        st.rerun()
+
+                    st.divider()
 
 # ── Analytics tab ────────────────────────────────────────────────────────────
 
 with analytics_tab:
 
-    # --- Bar chart: current inventory levels ---
-    st.subheader("Current Inventory Levels")
+    # --- Chart 1: Current Inventory — On Hand vs Committed ──────────────────
+    st.subheader("Inventory: On Hand vs Committed")
 
-    chart_parts = db.query(ProductRow).order_by(ProductRow.name).all()
-
-    if not chart_parts:
+    if not all_parts:
         st.info("No parts found. Run `python seed.py` to load initial data.")
     else:
-        part_names = [p.name for p in chart_parts]
-        stock_levels = [p.current_stock for p in chart_parts]
+        _chart_data = pd.DataFrame([
+            {
+                "Part": p.name,
+                "On Hand": p.current_stock,
+                "Committed": committed_by_part.get(p.id, 0),
+                "Available": p.current_stock - committed_by_part.get(p.id, 0),
+            }
+            for p in all_parts
+        ])
 
-        fig_bar, ax_bar = plt.subplots(figsize=(8, 4))
-        bars = ax_bar.bar(part_names, stock_levels, color="#4C9BE8", edgecolor="white")
-        ax_bar.set_xlabel("Part", labelpad=8)
-        ax_bar.set_ylabel("Units in Stock")
-        ax_bar.set_title("Inventory by Part")
-        ax_bar.yaxis.grid(True, alpha=0.35, linestyle="--")
-        ax_bar.set_axisbelow(True)
-
-        # Label each bar with its exact value
-        for bar, val in zip(bars, stock_levels):
-            ax_bar.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + max(stock_levels, default=1) * 0.02,
-                str(val),
-                ha="center",
-                va="bottom",
-                fontsize=9,
-            )
-
-        fig_bar.tight_layout()
-        st.pyplot(fig_bar)
-        plt.close(fig_bar)
+        _fig_inv = go.Figure()
+        _fig_inv.add_bar(
+            name="Available",
+            x=_chart_data["Part"],
+            y=_chart_data["Available"],
+            marker_color="#27AE60",
+            hovertemplate="<b>%{x}</b><br>Available: %{y}<extra></extra>",
+        )
+        _fig_inv.add_bar(
+            name="Committed",
+            x=_chart_data["Part"],
+            y=_chart_data["Committed"],
+            marker_color="#E67E22",
+            hovertemplate="<b>%{x}</b><br>Committed: %{y}<extra></extra>",
+        )
+        _fig_inv.update_layout(
+            barmode="stack",
+            xaxis_title="Part",
+            yaxis_title="Units",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            margin=dict(t=40, b=40),
+            hovermode="x unified",
+        )
+        st.plotly_chart(_fig_inv, use_container_width=True)
 
     st.divider()
 
-    # --- Line chart: cumulative completed printers per day ---
+    # --- Chart 2: Supplier Lead Time comparison ──────────────────────────────
+    st.subheader("Average Lead Time by Supplier")
+    st.caption("Use this to compare suppliers and choose faster restocking options.")
+
+    _catalog_rows = (
+        db.query(SupplierCatalogRow, SupplierRow, ProductRow)
+        .join(SupplierRow, SupplierCatalogRow.supplier_id == SupplierRow.id)
+        .join(ProductRow, SupplierCatalogRow.part_id == ProductRow.id)
+        .all()
+    )
+
+    if not _catalog_rows:
+        st.info("No supplier catalog found. Run `python seed.py` first.")
+    else:
+        _lt_rows = [
+            {
+                "Supplier": s.name,
+                "Part": p.name,
+                "Lead Time (days)": c.lead_time_days,
+                "Unit Price ($)": float(c.unit_price),
+            }
+            for c, s, p in _catalog_rows
+        ]
+        _df_lt = pd.DataFrame(_lt_rows)
+
+        # Average lead time per supplier across all parts they carry
+        _avg_lt = (
+            _df_lt.groupby("Supplier")["Lead Time (days)"]
+            .mean()
+            .reset_index()
+            .sort_values("Lead Time (days)")
+        )
+
+        _fig_lt = px.bar(
+            _avg_lt,
+            x="Supplier",
+            y="Lead Time (days)",
+            color="Lead Time (days)",
+            color_continuous_scale=["#27AE60", "#F39C12", "#E74C3C"],
+            text="Lead Time (days)",
+            title="Average Lead Time per Supplier (lower is faster)",
+        )
+        _fig_lt.update_traces(
+            texttemplate="%{text:.1f}d",
+            textposition="outside",
+            hovertemplate="<b>%{x}</b><br>Avg lead time: %{y:.1f} days<extra></extra>",
+        )
+        _fig_lt.update_layout(
+            showlegend=False,
+            coloraxis_showscale=False,
+            yaxis_title="Avg Lead Time (days)",
+            margin=dict(t=60, b=40),
+        )
+        st.plotly_chart(_fig_lt, use_container_width=True)
+
+        # Per-part detail table as supporting data
+        with st.expander("Per-part supplier detail"):
+            st.dataframe(
+                _df_lt.sort_values(["Part", "Lead Time (days)"]),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    st.divider()
+
+    # --- Chart 3: Cumulative Completed Printers Over Time ────────────────────
     st.subheader("Completed Printers Over Time")
 
-    # Reconstruct history from PRODUCTION_COMPLETED events on individual MOs.
-    # Each such event carries {"quantity_built": N} in event_metadata.
     completion_events = (
         db.query(EventRow)
         .filter(
@@ -495,39 +813,50 @@ with analytics_tab:
     if not completion_events:
         st.info("No completed printers yet. Advance a few days to generate data.")
     else:
-        # Aggregate units built per simulation day
         day_totals: dict[int, int] = {}
         for e in completion_events:
             qty = (e.event_metadata or {}).get("quantity_built", 1)
             day_totals[e.day] = day_totals.get(e.day, 0) + qty
 
         days_sorted = sorted(day_totals.keys())
-
-        # Fill any gaps so the x-axis is continuous (days with no completions → 0)
         all_days = list(range(min(days_sorted), max(days_sorted) + 1))
         daily_built = [day_totals.get(d, 0) for d in all_days]
 
-        # Cumulative sum
         cumulative: list[int] = []
         running = 0
         for v in daily_built:
             running += v
             cumulative.append(running)
 
-        fig_line, ax_line = plt.subplots(figsize=(8, 4))
-        ax_line.plot(all_days, cumulative, marker="o", markersize=4,
-                     color="#27AE60", linewidth=2, label="Cumulative")
-        ax_line.fill_between(all_days, cumulative, alpha=0.12, color="#27AE60")
-        ax_line.set_xlabel("Simulation Day", labelpad=8)
-        ax_line.set_ylabel("Total Completed Printers")
-        ax_line.set_title("Cumulative Printers Completed")
-        ax_line.yaxis.grid(True, alpha=0.35, linestyle="--")
-        ax_line.set_axisbelow(True)
-        ax_line.legend()
+        _df_prod = pd.DataFrame({"Day": all_days, "Daily": daily_built, "Cumulative": cumulative})
 
-        fig_line.tight_layout()
-        st.pyplot(fig_line)
-        plt.close(fig_line)
+        _fig_prod = go.Figure()
+        _fig_prod.add_scatter(
+            x=_df_prod["Day"],
+            y=_df_prod["Cumulative"],
+            mode="lines+markers",
+            name="Cumulative",
+            line=dict(color="#4C9BE8", width=2),
+            marker=dict(size=5),
+            fill="tozeroy",
+            fillcolor="rgba(76, 155, 232, 0.12)",
+            hovertemplate="Day %{x}<br>Total built: %{y}<extra></extra>",
+        )
+        _fig_prod.add_bar(
+            x=_df_prod["Day"],
+            y=_df_prod["Daily"],
+            name="Built this day",
+            marker_color="rgba(39, 174, 96, 0.6)",
+            hovertemplate="Day %{x}<br>Built: %{y}<extra></extra>",
+        )
+        _fig_prod.update_layout(
+            xaxis_title="Simulation Day",
+            yaxis_title="Printers",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            hovermode="x unified",
+            margin=dict(t=40, b=40),
+        )
+        st.plotly_chart(_fig_prod, use_container_width=True)
 
 # ── System tab ───────────────────────────────────────────────────────────────
 
@@ -570,7 +899,6 @@ with system_tab:
             snapshot = None
 
         if snapshot is not None:
-            # Show snapshot metadata before the user commits to restoring
             version = snapshot.get("version", "unknown")
             exported_at = snapshot.get("exported_at", "unknown")
 
@@ -585,8 +913,6 @@ with system_tab:
                     f"Snapshot version **{version}** — exported at `{exported_at}`"
                 )
 
-                # Summarise row counts from the file so the user knows what they are
-                # restoring before clicking the confirm button.
                 data = snapshot["data"]
                 count_cols = st.columns(4)
                 count_cols[0].metric("Products", len(data.get("products", [])))
