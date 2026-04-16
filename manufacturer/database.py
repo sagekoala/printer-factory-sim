@@ -119,6 +119,21 @@ class PurchaseOrderRow(Base):
     lead_time_remaining = Column(Integer, nullable=True)
 
 
+class OutboundPurchaseOrderRow(Base):
+    """Purchase order placed from manufacturer to external provider API."""
+
+    __tablename__ = "outbound_purchase_orders"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    provider_name = Column(String, nullable=False)
+    provider_order_id = Column(String, nullable=False, unique=True)
+    product_name = Column(String, nullable=False)
+    quantity = Column(Integer, nullable=False)
+    placed_day = Column(Integer, nullable=False)
+    expected_delivery_day = Column(Integer, nullable=False)
+    status = Column(String, nullable=False, default="pending")
+
+
 class InventoryRow(Base):
     """Persistent representation of a :class:`models.Inventory` transaction."""
 

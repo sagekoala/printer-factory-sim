@@ -29,6 +29,7 @@ try:
     from manufacturer.database import (
         FactoryConfigRow,
         ManufacturingOrderRow,
+        OutboundPurchaseOrderRow,
         ProductRow,
         PurchaseOrderRow,
         get_db,
@@ -41,11 +42,18 @@ try:
         PurchaseOrder,
         PurchaseOrderStatus,
     )
+    from manufacturer.provider_integration import (
+        create_outbound_purchase,
+        fetch_supplier_catalog,
+        list_configured_suppliers,
+        list_outbound_purchase_orders,
+    )
     from manufacturer.simulation import advance_day
 except ModuleNotFoundError:
     from database import (
         FactoryConfigRow,
         ManufacturingOrderRow,
+        OutboundPurchaseOrderRow,
         ProductRow,
         PurchaseOrderRow,
         get_db,
@@ -57,6 +65,12 @@ except ModuleNotFoundError:
         Product,
         PurchaseOrder,
         PurchaseOrderStatus,
+    )
+    from provider_integration import (
+        create_outbound_purchase,
+        fetch_supplier_catalog,
+        list_configured_suppliers,
+        list_outbound_purchase_orders,
     )
     from simulation import advance_day
 from pydantic import BaseModel
@@ -108,6 +122,28 @@ class AdvanceDayResponse(BaseModel):
 
     previous_day: int
     current_day: int
+
+
+class ConfiguredSupplier(BaseModel):
+    name: str
+    url: str
+
+
+class CreateOutboundPurchaseRequest(BaseModel):
+    supplier_name: str
+    product_id: str
+    quantity: int
+
+
+class OutboundPurchaseOrderResponse(BaseModel):
+    id: str
+    provider_name: str
+    provider_order_id: str
+    product_name: str
+    quantity: int
+    placed_day: int
+    expected_delivery_day: int
+    status: str
 
 
 # ---------------------------------------------------------------------------
@@ -324,3 +360,59 @@ def simulation_advance(db: Session = Depends(get_db)) -> AdvanceDayResponse:
     new_day = advance_day(db)
 
     return AdvanceDayResponse(previous_day=previous_day, current_day=new_day)
+
+
+@app.get(
+    "/api/suppliers",
+    response_model=list[ConfiguredSupplier],
+    tags=["Provider Integration"],
+)
+def api_list_suppliers() -> list[ConfiguredSupplier]:
+    suppliers = list_configured_suppliers()
+    return [ConfiguredSupplier(**row) for row in suppliers]
+
+
+@app.get(
+    "/api/suppliers/{name}/catalog",
+    tags=["Provider Integration"],
+)
+def api_supplier_catalog(name: str) -> list[dict]:
+    try:
+        return fetch_supplier_catalog(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.post(
+    "/api/purchase",
+    response_model=OutboundPurchaseOrderResponse,
+    tags=["Provider Integration"],
+)
+def api_create_outbound_purchase(
+    payload: CreateOutboundPurchaseRequest,
+    db: Session = Depends(get_db),
+) -> OutboundPurchaseOrderResponse:
+    try:
+        row = create_outbound_purchase(
+            db,
+            supplier_name=payload.supplier_name,
+            product_id=payload.product_id,
+            quantity=payload.quantity,
+        )
+        return OutboundPurchaseOrderResponse(**row)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get(
+    "/api/purchase",
+    response_model=list[OutboundPurchaseOrderResponse],
+    tags=["Provider Integration"],
+)
+def api_list_outbound_purchases(db: Session = Depends(get_db)) -> list[OutboundPurchaseOrderResponse]:
+    rows = list_outbound_purchase_orders(db)
+    return [OutboundPurchaseOrderResponse(**row) for row in rows]
