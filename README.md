@@ -87,6 +87,56 @@ All endpoints return JSON. Request/response schemas are documented in the Swagge
 
 ---
 
+## Provider App (Supplier)
+
+The repo also includes an independent supplier service in `provider/`.
+
+### Run Provider API (port 8001)
+
+```bash
+uvicorn provider.api:app --port 8001 --reload
+```
+
+- API base URL: `http://localhost:8001`
+- Swagger UI: `http://localhost:8001/docs`
+
+### Provider CLI
+
+You can run commands either as a module:
+
+```bash
+python -m provider.cli --help
+```
+
+Or via script entrypoint (after editable install):
+
+```bash
+pip install -e .
+provider-cli --help
+```
+
+Available commands:
+
+```bash
+provider-cli catalog
+provider-cli stock
+provider-cli orders list --status pending
+provider-cli orders show <id>
+provider-cli price set <product> <tier> <price>
+provider-cli restock <product> <quantity>
+provider-cli day current
+provider-cli day advance
+provider-cli export
+provider-cli import <file>
+provider-cli serve --port 8001
+```
+
+Seed data is loaded from `provider/seed-provider.json` and mirrors manufacturer BOM part names (PCB, Extruder, Cable, Frame, Stepper Motor).
+
+This provider app work addresses issues #14 and #15.
+
+---
+
 ## How the Simulation Works
 
 The core of the system is the **Advance Day** cycle, implemented in `simulation.py:advance_day()`. Every time a day is advanced — either via the dashboard's "Next Day" button or the `POST /simulation/advance` API call — the following four phases execute in strict order:
