@@ -1,0 +1,11 @@
+{
+  "manufacturer": {
+    "port": 8002,
+    "providers": [
+      {
+        "name": "ChipSupply Co",
+        "url": "http://localhost:8001"
+      }
+    ]
+  }
+}

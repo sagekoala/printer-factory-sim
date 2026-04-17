@@ -16,6 +16,7 @@ dependencies = [
   "pandas",
   "matplotlib",
   "typer",
+  "httpx",
 ]
 
 [project.scripts]

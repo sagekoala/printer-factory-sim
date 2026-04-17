@@ -20,32 +20,44 @@ try:
         FactoryConfigRow,
         ManufacturingOrderRow,
         ProductRow,
-        PurchaseOrderRow,
         SessionLocal,
         init_db,
     )
     from manufacturer.models import ManufacturingOrderStatus
+    from manufacturer.provider_integration import (
+        create_outbound_purchase,
+        fetch_supplier_catalog,
+        list_configured_suppliers,
+        list_outbound_purchase_orders,
+    )
     from manufacturer.simulation import advance_day, export_state, import_state
 except ModuleNotFoundError:
     from database import (
         FactoryConfigRow,
         ManufacturingOrderRow,
         ProductRow,
-        PurchaseOrderRow,
         SessionLocal,
         init_db,
     )
     from models import ManufacturingOrderStatus
+    from provider_integration import (
+        create_outbound_purchase,
+        fetch_supplier_catalog,
+        list_configured_suppliers,
+        list_outbound_purchase_orders,
+    )
     from simulation import advance_day, export_state, import_state
 
 app = typer.Typer(help="Manufacturer simulation CLI")
 orders_app = typer.Typer(help="Manufacturing order commands")
 purchase_app = typer.Typer(help="Purchase order commands")
 day_app = typer.Typer(help="Simulation day commands")
+suppliers_app = typer.Typer(help="External supplier commands")
 
 app.add_typer(orders_app, name="orders")
 app.add_typer(purchase_app, name="purchase")
 app.add_typer(day_app, name="day")
+app.add_typer(suppliers_app, name="suppliers")
 
 
 def _get_current_day(db) -> int:
@@ -105,28 +117,53 @@ def orders_list(
         db.close()
 
 
-@purchase_app.command("list")
-def purchase_list() -> None:
-    """List purchase orders."""
+@suppliers_app.command("list")
+def suppliers_list() -> None:
+    """List configured external providers."""
+    init_db()
+    typer.echo(json.dumps(list_configured_suppliers(), indent=2))
+
+
+@suppliers_app.command("catalog")
+def suppliers_catalog(supplier_name: str) -> None:
+    """Show catalog for a configured supplier."""
+    init_db()
+    try:
+        typer.echo(json.dumps(fetch_supplier_catalog(supplier_name), indent=2))
+    except (ValueError, RuntimeError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+
+@purchase_app.command("create")
+def purchase_create(
+    supplier: str = typer.Option(..., "--supplier"),
+    product: str = typer.Option(..., "--product"),
+    qty: int = typer.Option(..., "--qty"),
+) -> None:
+    """Create outbound purchase order against provider API."""
     init_db()
     db = SessionLocal()
     try:
-        rows = db.query(PurchaseOrderRow).order_by(PurchaseOrderRow.created_at).all()
-        typer.echo(json.dumps([
-            {
-                "id": r.id,
-                "part_id": r.part_id,
-                "supplier_id": r.supplier_id,
-                "quantity": r.quantity,
-                "unit_price": str(r.unit_price),
-                "status": r.status,
-                "created_at": r.created_at.isoformat() if r.created_at else None,
-                "ship_date": r.ship_date.isoformat() if r.ship_date else None,
-                "delivered_at": r.delivered_at.isoformat() if r.delivered_at else None,
-                "lead_time_remaining": r.lead_time_remaining,
-            }
-            for r in rows
-        ], indent=2))
+        row = create_outbound_purchase(
+            db,
+            supplier_name=supplier,
+            product_id=product,
+            quantity=qty,
+        )
+        typer.echo(json.dumps(row, indent=2))
+    except (ValueError, RuntimeError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        db.close()
+
+
+@purchase_app.command("list")
+def purchase_list() -> None:
+    """List outbound purchase orders recorded locally."""
+    init_db()
+    db = SessionLocal()
+    try:
+        typer.echo(json.dumps(list_outbound_purchase_orders(db), indent=2))
     finally:
         db.close()
 
