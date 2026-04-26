@@ -1,28 +1,56 @@
-"""Database layer for the provider app."""
+"""Provider database engine, session factory, and persistence helpers.
+
+The ORM table classes themselves live in :mod:`provider.models` so that
+schema and Pydantic contracts evolve together.  This module owns the
+SQLAlchemy ``engine``, the session factory, the FastAPI session
+dependency, and small persistence utilities that several services share
+(``log_event``, ``get_current_day`` / ``set_current_day``).
+
+DB file location
+----------------
+The default SQLite file is **always** placed inside the ``provider/``
+directory regardless of the caller's current working directory.  This
+guarantees that ``cd provider && python seed.py`` and
+``uvicorn provider.api:app`` from the repo root operate on the same
+``provider/provider.db`` file.
+
+Override with the ``PROVIDER_DATABASE_URL`` environment variable.
+"""
 
 from __future__ import annotations
 
-import json
 import os
-import uuid
-from datetime import datetime
-from enum import Enum
 from pathlib import Path
-from typing import Any, Generator
+from typing import Generator
 
-from sqlalchemy import (
-    Column,
-    DateTime,
-    ForeignKey,
-    Integer,
-    Numeric,
-    String,
-    Text,
-    create_engine,
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+
+# Re-export ORM classes & enum so existing call-sites
+# ``from provider.db import ProductRow`` keep working without churn.
+from provider.models import (  # noqa: F401  (re-exported)
+    Base,
+    EventRow,
+    OrderRow,
+    OrderStatus,
+    PricingTierRow,
+    ProductRow,
+    SimStateRow,
+    StockRow,
 )
-from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
-DATABASE_URL = os.getenv("PROVIDER_DATABASE_URL", "sqlite:///./provider/provider.db")
+
+# ---------------------------------------------------------------------------
+# Engine + session
+# ---------------------------------------------------------------------------
+
+_PROVIDER_DIR = Path(__file__).resolve().parent
+_DEFAULT_DB_PATH = _PROVIDER_DIR / "provider.db"
+
+DATABASE_URL: str = os.getenv(
+    "PROVIDER_DATABASE_URL",
+    f"sqlite:///{_DEFAULT_DB_PATH}",
+)
 
 engine = create_engine(
     DATABASE_URL,
@@ -31,89 +59,21 @@ engine = create_engine(
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
-class Base(DeclarativeBase):
-    """Provider declarative base."""
-
-
-class OrderStatus(str, Enum):
-    """Order status enum."""
-
-    pending = "pending"
-    confirmed = "confirmed"
-    in_progress = "in_progress"
-    shipped = "shipped"
-    delivered = "delivered"
-    rejected = "rejected"
-    cancelled = "cancelled"
-
-
-class ProductRow(Base):
-    __tablename__ = "products"
-
-    id = Column(String, primary_key=True)
-    name = Column(String, unique=True, nullable=False)
-    description = Column(Text, nullable=False)
-    lead_time_days = Column(Integer, nullable=False)
-
-
-class PricingTierRow(Base):
-    __tablename__ = "pricing_tiers"
-
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    product_id = Column(String, ForeignKey("products.id"), nullable=False)
-    min_quantity = Column(Integer, nullable=False)
-    unit_price = Column(Numeric(10, 2), nullable=False)
-
-
-class StockRow(Base):
-    __tablename__ = "stock"
-
-    product_id = Column(String, ForeignKey("products.id"), primary_key=True)
-    quantity = Column(Integer, nullable=False, default=0)
-
-
-class OrderRow(Base):
-    __tablename__ = "orders"
-
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    buyer = Column(String, nullable=False)
-    product_id = Column(String, ForeignKey("products.id"), nullable=False)
-    quantity = Column(Integer, nullable=False)
-    unit_price = Column(Numeric(10, 2), nullable=False)
-    total_price = Column(Numeric(12, 2), nullable=False)
-    placed_day = Column(Integer, nullable=False)
-    expected_delivery_day = Column(Integer, nullable=False)
-    shipped_day = Column(Integer, nullable=True)
-    delivered_day = Column(Integer, nullable=True)
-    status = Column(String, nullable=False, default=OrderStatus.pending.value)
-
-
-class EventRow(Base):
-    __tablename__ = "events"
-
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
-    sim_day = Column(Integer, nullable=False)
-    event_type = Column(String, nullable=False)
-    entity_type = Column(String, nullable=False)
-    entity_id = Column(String, nullable=False)
-    detail = Column(Text, nullable=False)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-
-
-class SimStateRow(Base):
-    __tablename__ = "sim_state"
-
-    key = Column(String, primary_key=True)
-    value = Column(String, nullable=False)
+# ---------------------------------------------------------------------------
+# Lifecycle helpers
+# ---------------------------------------------------------------------------
 
 
 def init_db() -> None:
-    """Create provider tables."""
+    """Create every provider table if it does not already exist.
+
+    Safe to call repeatedly (no-op when tables exist).
+    """
     Base.metadata.create_all(bind=engine)
 
 
 def get_db() -> Generator[Session, None, None]:
-    """FastAPI dependency for DB sessions."""
+    """Yield a database session (intended for FastAPI ``Depends``)."""
     db = SessionLocal()
     try:
         yield db
@@ -121,17 +81,29 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
+# ---------------------------------------------------------------------------
+# Simulation-clock helpers
+# ---------------------------------------------------------------------------
+
+
 def get_current_day(db: Session) -> int:
+    """Return the current simulation day (``0`` if never set)."""
     row = db.query(SimStateRow).filter(SimStateRow.key == "current_day").first()
     return int(row.value) if row else 0
 
 
 def set_current_day(db: Session, day: int) -> None:
+    """Persist the current simulation day in ``sim_state``."""
     row = db.query(SimStateRow).filter(SimStateRow.key == "current_day").first()
     if row is None:
         db.add(SimStateRow(key="current_day", value=str(day)))
     else:
         row.value = str(day)
+
+
+# ---------------------------------------------------------------------------
+# Audit-log helper
+# ---------------------------------------------------------------------------
 
 
 def log_event(
@@ -142,6 +114,11 @@ def log_event(
     entity_id: str,
     detail: str,
 ) -> None:
+    """Append a row to the ``events`` audit table.
+
+    The caller is responsible for committing the surrounding transaction;
+    ``log_event`` only stages the insert via ``db.add``.
+    """
     db.add(
         EventRow(
             sim_day=sim_day,
@@ -149,59 +126,24 @@ def log_event(
             entity_type=entity_type,
             entity_id=entity_id,
             detail=detail,
-            created_at=datetime.utcnow(),
         )
     )
 
 
+# ---------------------------------------------------------------------------
+# Backwards-compatible seed shim
+# ---------------------------------------------------------------------------
+
+
 def ensure_seeded(seed_file: Path | None = None) -> None:
-    """Seed provider catalog if products table is empty."""
-    init_db()
-    db = SessionLocal()
-    try:
-        has_products = db.query(ProductRow).first() is not None
-        if has_products:
-            if db.query(SimStateRow).filter(SimStateRow.key == "current_day").first() is None:
-                set_current_day(db, 0)
-                db.commit()
-            return
+    """Idempotently load the seed file into the provider DB.
 
-        source = seed_file or (Path(__file__).parent / "seed-provider.json")
-        payload: dict[str, Any] = json.loads(source.read_text())
+    Thin shim that delegates to :func:`provider.seed.seed` so that legacy
+    callers (``api.py`` lifespan, ``cli.py`` command init) continue to
+    work, while the canonical, runnable seeding logic lives in
+    ``provider/seed.py``.
+    """
+    # Local import avoids a circular dependency at module import time.
+    from provider.seed import seed as _seed
 
-        for product in payload.get("products", []):
-            db.add(
-                ProductRow(
-                    id=product["id"],
-                    name=product["name"],
-                    description=product["description"],
-                    lead_time_days=int(product["lead_time_days"]),
-                )
-            )
-
-        for tier in payload.get("pricing_tiers", []):
-            db.add(
-                PricingTierRow(
-                    id=tier.get("id") or str(uuid.uuid4()),
-                    product_id=tier["product_id"],
-                    min_quantity=int(tier["min_quantity"]),
-                    unit_price=tier["unit_price"],
-                )
-            )
-
-        for item in payload.get("stock", []):
-            db.add(
-                StockRow(
-                    product_id=item["product_id"],
-                    quantity=int(item["quantity"]),
-                )
-            )
-
-        state = payload.get("sim_state", {"current_day": 0})
-        set_current_day(db, int(state.get("current_day", 0)))
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
+    _seed(seed_file=seed_file)

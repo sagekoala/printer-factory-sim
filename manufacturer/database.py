@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Generator
 
 from sqlalchemy import (
@@ -25,7 +26,14 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
-DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./printer_factory.db")
+# The default DB always lives next to this file (``manufacturer/manufacturer.db``)
+# regardless of the caller's cwd, so ``cd manufacturer && uvicorn main:app``
+# and ``uvicorn manufacturer.main:app`` from the repo root operate on the
+# same file.  Override with the ``DATABASE_URL`` env var when needed.
+_MANUFACTURER_DIR = Path(__file__).resolve().parent
+_DEFAULT_DB_PATH = _MANUFACTURER_DIR / "manufacturer.db"
+
+DATABASE_URL: str = os.getenv("DATABASE_URL", f"sqlite:///{_DEFAULT_DB_PATH}")
 
 engine = create_engine(
     DATABASE_URL,
