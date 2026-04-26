@@ -47,17 +47,20 @@ class OrderStatus(str, Enum):
     """Lifecycle states for a provider-side order.
 
     Transitions are linear during normal operation
-    (``pending -> confirmed -> in_progress -> shipped -> delivered``);
-    ``rejected`` and ``cancelled`` are terminal failure states.
+    (``PENDING -> CONFIRMED -> IN_PROGRESS -> SHIPPED -> DELIVERED``);
+    ``CANCELLED`` and ``REJECTED`` are terminal failure states.
+
+    The string ``value`` of each member is the lowercase form persisted
+    in the database and surfaced over the API.
     """
 
-    pending = "pending"
-    confirmed = "confirmed"
-    in_progress = "in_progress"
-    shipped = "shipped"
-    delivered = "delivered"
-    rejected = "rejected"
-    cancelled = "cancelled"
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    IN_PROGRESS = "in_progress"
+    SHIPPED = "shipped"
+    DELIVERED = "delivered"
+    CANCELLED = "cancelled"
+    REJECTED = "rejected"
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +131,7 @@ class OrderRow(Base):
     expected_delivery_day = Column(Integer, nullable=False)
     shipped_day = Column(Integer, nullable=True)
     delivered_day = Column(Integer, nullable=True)
-    status = Column(String, nullable=False, default=OrderStatus.pending.value)
+    status = Column(String, nullable=False, default=OrderStatus.PENDING.value)
 
 
 class EventRow(Base):

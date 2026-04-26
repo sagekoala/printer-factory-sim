@@ -1,4 +1,29 @@
-"""Simulation services for provider app."""
+"""Simulation services for the provider app.
+
+Public API
+----------
+- :func:`get_current_day` — current simulation day (``int``)
+- :func:`advance_day` — move one day forward and run the daily cycle
+- :func:`export_state` / :func:`import_state` — JSON snapshot helpers
+
+Daily cycle (matches Week 6 spec exactly)
+-----------------------------------------
+For each call to :func:`advance_day`:
+
+1. **Deliver due shipments** — every ``SHIPPED`` order whose
+   ``expected_delivery_day <= current_day + 1`` transitions to
+   ``DELIVERED``; an ``order_delivered`` event is logged.
+2. **Process pending orders** — every ``PENDING`` order whose product
+   has enough stock walks the full chain
+   ``PENDING -> CONFIRMED -> IN_PROGRESS -> SHIPPED`` in a single
+   advance.  Stock is decremented, and an event row is written for
+   each transition.
+3. **Increment** ``current_day`` in ``sim_state`` and log a
+   ``day_advanced`` event.
+
+The function returns a summary dict ``{day, orders_shipped,
+orders_delivered}`` that the CLI/API can render directly.
+"""
 
 from __future__ import annotations
 
@@ -15,31 +40,70 @@ from provider.db import (
     ProductRow,
     SimStateRow,
     StockRow,
-    get_current_day,
+    get_current_day as _read_current_day,
     log_event,
     set_current_day,
 )
 
 
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+
+def get_current_day(db: Session) -> int:
+    """Return the current simulation day (``0`` if never set)."""
+    return _read_current_day(db)
+
+
 def advance_day(db: Session) -> dict:
-    """Advance the provider simulation by one day."""
-    current_day = get_current_day(db)
+    """Advance the simulation by one day.
 
-    _deliver_due_orders(db, current_day)
-    _process_pending_orders(db, current_day)
+    See module docstring for the full step ordering.  Returns::
 
+        {"day": <new_day>, "orders_shipped": int, "orders_delivered": int}
+
+    The transaction commits exactly once at the end so events and state
+    changes are atomic.
+    """
+    current_day = _read_current_day(db)
     new_day = current_day + 1
+
+    # Step 1: deliver shipped orders that are due.
+    orders_delivered = _deliver_due_orders(db, new_day=new_day)
+
+    # Step 2: ship pending orders that have stock.
+    orders_shipped = _process_pending_orders(db, new_day=new_day)
+
+    # Step 3: advance the clock and audit.
     set_current_day(db, new_day)
+    log_event(
+        db,
+        sim_day=new_day,
+        event_type="day_advanced",
+        entity_type="sim_state",
+        entity_id="current_day",
+        detail=(
+            f"Day advanced from {current_day} to {new_day} "
+            f"(shipped={orders_shipped}, delivered={orders_delivered})"
+        ),
+    )
     db.commit()
-    return {"previous_day": current_day, "current_day": new_day}
+
+    return {
+        "day": new_day,
+        "orders_shipped": orders_shipped,
+        "orders_delivered": orders_delivered,
+    }
 
 
-def current_day(db: Session) -> int:
-    return get_current_day(db)
+# ---------------------------------------------------------------------------
+# Snapshot helpers (used by `provider-cli export` / `import`)
+# ---------------------------------------------------------------------------
 
 
 def export_state(db: Session) -> dict:
-    """Export provider state as JSON-serializable dict."""
+    """Serialise the entire provider DB as a JSON-compatible snapshot."""
     return {
         "version": "1.0",
         "exported_at": datetime.utcnow().isoformat(),
@@ -63,10 +127,7 @@ def export_state(db: Session) -> dict:
                 for row in db.query(PricingTierRow).all()
             ],
             "stock": [
-                {
-                    "product_id": row.product_id,
-                    "quantity": row.quantity,
-                }
+                {"product_id": row.product_id, "quantity": row.quantity}
                 for row in db.query(StockRow).all()
             ],
             "orders": [
@@ -98,10 +159,7 @@ def export_state(db: Session) -> dict:
                 for row in db.query(EventRow).all()
             ],
             "sim_state": [
-                {
-                    "key": row.key,
-                    "value": row.value,
-                }
+                {"key": row.key, "value": row.value}
                 for row in db.query(SimStateRow).all()
             ],
         },
@@ -109,7 +167,7 @@ def export_state(db: Session) -> dict:
 
 
 def import_state(db: Session, snapshot: dict) -> None:
-    """Import provider state from snapshot dict."""
+    """Replace the provider DB contents with ``snapshot`` (destructive)."""
     required = {"products", "pricing_tiers", "stock", "orders", "events", "sim_state"}
     data = snapshot.get("data", {})
     missing = required - set(data.keys())
@@ -133,7 +191,6 @@ def import_state(db: Session, snapshot: dict) -> None:
                 lead_time_days=int(row["lead_time_days"]),
             )
         )
-
     for row in data["pricing_tiers"]:
         db.add(
             PricingTierRow(
@@ -143,7 +200,6 @@ def import_state(db: Session, snapshot: dict) -> None:
                 unit_price=Decimal(row["unit_price"]),
             )
         )
-
     for row in data["stock"]:
         db.add(
             StockRow(
@@ -151,7 +207,6 @@ def import_state(db: Session, snapshot: dict) -> None:
                 quantity=int(row["quantity"]),
             )
         )
-
     for row in data["orders"]:
         db.add(
             OrderRow(
@@ -168,9 +223,12 @@ def import_state(db: Session, snapshot: dict) -> None:
                 status=row["status"],
             )
         )
-
     for row in data["events"]:
-        created_at = datetime.fromisoformat(row["created_at"]) if row.get("created_at") else datetime.utcnow()
+        created_at = (
+            datetime.fromisoformat(row["created_at"])
+            if row.get("created_at")
+            else datetime.utcnow()
+        )
         db.add(
             EventRow(
                 id=row["id"],
@@ -182,68 +240,107 @@ def import_state(db: Session, snapshot: dict) -> None:
                 created_at=created_at,
             )
         )
-
     for row in data["sim_state"]:
         db.add(SimStateRow(key=row["key"], value=str(row["value"])))
 
     db.commit()
 
 
-def _deliver_due_orders(db: Session, sim_day: int) -> None:
+# ---------------------------------------------------------------------------
+# Internal step helpers
+# ---------------------------------------------------------------------------
+
+
+def _deliver_due_orders(db: Session, new_day: int) -> int:
+    """Mark every shipped order whose due day has arrived as DELIVERED.
+
+    The condition ``expected_delivery_day <= new_day`` matches the
+    spec wording ``expected_delivery_day <= current_day + 1`` since
+    ``new_day == current_day + 1`` at this point in the cycle.
+
+    Returns the number of orders that transitioned.
+    """
     orders = (
         db.query(OrderRow)
         .filter(
-            OrderRow.status == OrderStatus.shipped.value,
-            OrderRow.expected_delivery_day == sim_day,
+            OrderRow.status == OrderStatus.SHIPPED.value,
+            OrderRow.expected_delivery_day <= new_day,
         )
+        .order_by(OrderRow.expected_delivery_day, OrderRow.id)
         .all()
     )
 
     for order in orders:
-        order.status = OrderStatus.delivered.value
-        order.delivered_day = sim_day
-        log_event(
-            db,
-            sim_day=sim_day,
-            event_type="ORDER_STATUS_CHANGED",
-            entity_type="order",
-            entity_id=order.id,
-            detail=f"Order {order.id} transitioned shipped -> delivered",
-        )
+        _transition(db, order, OrderStatus.DELIVERED, sim_day=new_day)
+        order.delivered_day = new_day
+
+    return len(orders)
 
 
-def _process_pending_orders(db: Session, sim_day: int) -> None:
+def _process_pending_orders(db: Session, new_day: int) -> int:
+    """Walk every fulfillable PENDING order through the full chain.
+
+    For each pending order whose product has enough stock, the status
+    moves ``PENDING -> CONFIRMED -> IN_PROGRESS -> SHIPPED`` in this
+    single advance, decrementing stock and writing one event per
+    transition.  Returns the count of orders shipped.
+    """
     pending_orders = (
         db.query(OrderRow)
-        .filter(OrderRow.status == OrderStatus.pending.value)
+        .filter(OrderRow.status == OrderStatus.PENDING.value)
         .order_by(OrderRow.placed_day, OrderRow.id)
         .all()
     )
 
+    shipped_count = 0
     for order in pending_orders:
         stock = db.query(StockRow).filter(StockRow.product_id == order.product_id).first()
         available = stock.quantity if stock else 0
         if available < order.quantity:
+            # Not enough stock — leave PENDING and try again next day.
             continue
 
-        _set_order_status(db, order, OrderStatus.confirmed, sim_day)
-        _set_order_status(db, order, OrderStatus.in_progress, sim_day)
+        _transition(db, order, OrderStatus.CONFIRMED, sim_day=new_day)
+        _transition(db, order, OrderStatus.IN_PROGRESS, sim_day=new_day)
 
+        # Decrement stock once production starts.
         if stock is not None:
             stock.quantity -= order.quantity
 
-        _set_order_status(db, order, OrderStatus.shipped, sim_day)
-        order.shipped_day = sim_day
+        _transition(db, order, OrderStatus.SHIPPED, sim_day=new_day)
+        order.shipped_day = new_day
+        shipped_count += 1
+
+    return shipped_count
 
 
-def _set_order_status(db: Session, order: OrderRow, new_status: OrderStatus, sim_day: int) -> None:
+def _transition(
+    db: Session,
+    order: OrderRow,
+    new_status: OrderStatus,
+    sim_day: int,
+) -> None:
+    """Mutate ``order.status`` and log a transition-specific event.
+
+    The event type is derived from ``new_status`` so each transition
+    has a distinct, queryable type (``order_confirmed``,
+    ``order_in_progress``, ``order_shipped``, ``order_delivered``).
+    """
     old_status = order.status
     order.status = new_status.value
     log_event(
         db,
         sim_day=sim_day,
-        event_type="ORDER_STATUS_CHANGED",
+        event_type=f"order_{new_status.value}",
         entity_type="order",
         entity_id=order.id,
-        detail=f"Order {order.id} transitioned {old_status} -> {new_status.value}",
+        detail=f"Order {order.id}: {old_status} -> {new_status.value}",
     )
+
+
+__all__ = [
+    "advance_day",
+    "get_current_day",
+    "export_state",
+    "import_state",
+]
