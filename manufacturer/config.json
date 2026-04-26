@@ -1,0 +1,8 @@
+{
+  "providers": [
+    {
+      "name": "ChipSupply Co",
+      "url": "http://localhost:8001"
+    }
+  ]
+}
