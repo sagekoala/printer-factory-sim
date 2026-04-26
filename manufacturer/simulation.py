@@ -55,7 +55,7 @@ try:
         SupplierRow,
     )
     from manufacturer.models import EventType, ManufacturingOrderStatus, PurchaseOrderStatus
-    from manufacturer.provider_integration import sync_outbound_purchase_orders
+    from manufacturer.services.suppliers import check_deliveries
 except ModuleNotFoundError:
     from database import (
         BOMEntryRow,
@@ -69,7 +69,7 @@ except ModuleNotFoundError:
         SupplierRow,
     )
     from models import EventType, ManufacturingOrderStatus, PurchaseOrderStatus
-    from provider_integration import sync_outbound_purchase_orders
+    from services.suppliers import check_deliveries
 
 # ---------------------------------------------------------------------------
 # Constants (all overridable via factory_config table)
@@ -93,8 +93,21 @@ _FACTORY_ENTITY_ID = "00000000-0000-0000-0000-000000000001"
 def advance_day(db: Session) -> int:
     """Advance the simulation by one day.
 
-    Runs all four simulation phases in order, commits the session, and
+    Runs all simulation phases in order, commits the session, and
     returns the new simulation day number.
+
+    Phase order:
+        1. **Day increment** — bump ``current_day``.
+        2. **Provider deliveries** — :func:`check_deliveries` polls every
+           configured provider for our outstanding outbound POs, mirrors
+           ``delivered`` ones into local stock, and writes
+           ``purchase_order_delivered`` events.  This is the very first
+           thing we do after the clock advances so the rest of the day
+           sees the freshly received parts.
+        3. **Internal PO delivery** — Week 5 in-process supplier POs
+           tick down their lead-time counters.
+        4. **Demand generation** — new customer manufacturing orders.
+        5. **Order fulfilment** — consume BOM and produce printers.
 
     Args:
         db: An active SQLAlchemy :class:`~sqlalchemy.orm.Session`.
@@ -103,7 +116,27 @@ def advance_day(db: Session) -> int:
         The new current simulation day (1-based).
     """
     day = _increment_day(db)
-    sync_outbound_purchase_orders(db, day)
+
+    delivered = check_deliveries(db)
+    for order in delivered:
+        _log(
+            db,
+            day,
+            EventType.PURCHASE_DELIVERED,
+            entity_type="outbound_purchase_order",
+            entity_id=order["id"],
+            description=(
+                f"Day {day}: Received {order['quantity']}x "
+                f"{order['product_name']} from {order['supplier_name']}"
+            ),
+            extra={
+                "supplier_name": order["supplier_name"],
+                "provider_order_id": order["provider_order_id"],
+                "product_name": order["product_name"],
+                "quantity_received": order["quantity"],
+            },
+        )
+
     _deliver_purchase_orders(db, day)
     _generate_demand(db, day)
     _fulfill_manufacturing_orders(db, day)

@@ -17,6 +17,7 @@ from sqlalchemy import (
     JSON,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     Integer,
     Numeric,
@@ -128,7 +129,18 @@ class PurchaseOrderRow(Base):
 
 
 class OutboundPurchaseOrderRow(Base):
-    """Purchase order placed from manufacturer to external provider API."""
+    """Purchase order placed from manufacturer to an external provider API.
+
+    This is the *Week 6* "purchase_orders" table from the challenge spec —
+    we keep the historical Python class name :class:`OutboundPurchaseOrderRow`
+    (and physical table ``outbound_purchase_orders``) to avoid clashing
+    with the Week 5 :class:`PurchaseOrderRow` table for *internal* POs.
+
+    ``provider_order_id`` is stored as ``String`` rather than the spec's
+    ``INTEGER`` because the running provider API issues UUID order ids
+    (e.g. ``"78c4ead3-..."``) — coercing them to integers would lose
+    information.
+    """
 
     __tablename__ = "outbound_purchase_orders"
 
@@ -137,8 +149,11 @@ class OutboundPurchaseOrderRow(Base):
     provider_order_id = Column(String, nullable=False, unique=True)
     product_name = Column(String, nullable=False)
     quantity = Column(Integer, nullable=False)
+    unit_price = Column(Float, nullable=False, default=0.0)
+    total_price = Column(Float, nullable=False, default=0.0)
     placed_day = Column(Integer, nullable=False)
     expected_delivery_day = Column(Integer, nullable=False)
+    delivered_day = Column(Integer, nullable=True)
     status = Column(String, nullable=False, default="pending")
 
 
@@ -184,8 +199,42 @@ class FactoryConfigRow(Base):
 
 
 def init_db() -> None:
-    """Create all tables if they do not already exist."""
+    """Create all tables if they do not already exist, then run lightweight
+    column migrations for tables that gained fields after Week 5.
+
+    SQLAlchemy's :func:`create_all` only creates *missing* tables — it
+    never alters existing ones.  For SQLite this is fine when the DB is
+    empty, but if a developer has a leftover ``manufacturer.db`` from
+    Week 5/early-Week-6 it will be missing the new
+    ``outbound_purchase_orders`` columns.  We patch them in here.
+    """
     Base.metadata.create_all(bind=engine)
+    _migrate_outbound_purchase_orders_columns()
+
+
+def _migrate_outbound_purchase_orders_columns() -> None:
+    """Add ``unit_price`` / ``total_price`` / ``delivered_day`` if missing.
+
+    Idempotent: introspects the live schema with ``PRAGMA table_info``
+    and only ALTERs columns that aren't already present.
+    """
+    needed: dict[str, str] = {
+        "unit_price": "REAL NOT NULL DEFAULT 0.0",
+        "total_price": "REAL NOT NULL DEFAULT 0.0",
+        "delivered_day": "INTEGER",
+    }
+    with engine.begin() as conn:
+        rows = conn.exec_driver_sql(
+            "PRAGMA table_info(outbound_purchase_orders)"
+        ).fetchall()
+        if not rows:
+            return  # table not created yet — create_all will handle it next start
+        existing = {row[1] for row in rows}
+        for col, ddl in needed.items():
+            if col not in existing:
+                conn.exec_driver_sql(
+                    f"ALTER TABLE outbound_purchase_orders ADD COLUMN {col} {ddl}"
+                )
 
 
 def get_db() -> Generator[Session, None, None]:

@@ -1,49 +1,68 @@
-"""HTTP integration with external provider services."""
+"""Backward-compat shim for the Week 5/early-Week-6 provider integration.
+
+All real logic now lives in :mod:`manufacturer.services.suppliers`.
+This module preserves the historical entry points so the FastAPI
+endpoints in :mod:`manufacturer.main` and any other callers continue
+to work without modification:
+
+- :func:`list_configured_suppliers` -> :func:`services.list_providers`
+- :func:`fetch_supplier_catalog` -> :func:`services.get_catalog` (by name)
+- :func:`create_outbound_purchase` -> :func:`services.place_order`
+- :func:`list_outbound_purchase_orders` -> :func:`services.list_purchase_orders`
+- :func:`sync_outbound_purchase_orders` -> :func:`services.check_deliveries`
+
+New code should import directly from
+``manufacturer.services.suppliers``; this shim exists only so we don't
+break Week 5 endpoints by renaming functions.
+"""
 
 from __future__ import annotations
 
-import json
-import uuid
-from pathlib import Path
-
-import httpx
 from sqlalchemy.orm import Session
 
 try:
-    from manufacturer.database import (
-        EventRow,
-        FactoryConfigRow,
-        OutboundPurchaseOrderRow,
-        ProductRow,
+    from manufacturer.database import FactoryConfigRow
+    from manufacturer.services.suppliers import (
+        ProviderError,
+        ProviderHTTPError,
+        ProviderUnreachableError,
+        check_deliveries,
+        get_catalog,
+        list_providers,
+        list_purchase_orders,
+        place_order,
     )
-except ModuleNotFoundError:
-    from database import EventRow, FactoryConfigRow, OutboundPurchaseOrderRow, ProductRow
-
-_PROVIDER_CONFIG = Path(__file__).parent / "provider_config.json"
-_REQUEST_TIMEOUT_SECONDS = 8.0
+except ModuleNotFoundError:  # standalone execution from inside ``manufacturer/``
+    from database import FactoryConfigRow  # type: ignore[no-redef]
+    from services.suppliers import (  # type: ignore[no-redef]
+        ProviderError,
+        ProviderHTTPError,
+        ProviderUnreachableError,
+        check_deliveries,
+        get_catalog,
+        list_providers,
+        list_purchase_orders,
+        place_order,
+    )
 
 
 def list_configured_suppliers() -> list[dict[str, str]]:
-    config = _load_provider_config()
-    return config["manufacturer"].get("providers", [])
+    """Legacy alias for :func:`services.suppliers.list_providers`."""
+    return list_providers()
 
 
 def fetch_supplier_catalog(supplier_name: str) -> list[dict]:
-    supplier = _get_supplier_or_raise(supplier_name)
-    url = f"{supplier['url'].rstrip('/')}/api/catalog"
+    """Legacy alias: look up the provider URL by name, then fetch catalog.
+
+    Raises ``ValueError`` for unknown supplier and ``RuntimeError`` for
+    transport failures (matching the original signature so the existing
+    FastAPI handlers translate them to 404/502 unchanged).
+    """
+    supplier = _supplier_or_raise(supplier_name)
     try:
-        with httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS) as client:
-            response = client.get(url)
-            response.raise_for_status()
-            return response.json()
-    except httpx.RequestError as exc:
-        raise RuntimeError(
-            f"Provider '{supplier_name}' is unreachable at {supplier['url']}: {exc}"
-        ) from exc
-    except httpx.HTTPStatusError as exc:
-        raise RuntimeError(
-            f"Provider '{supplier_name}' returned HTTP {exc.response.status_code} for /api/catalog"
-        ) from exc
+        return get_catalog(supplier["url"])
+    except ProviderError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def create_outbound_purchase(
@@ -52,221 +71,82 @@ def create_outbound_purchase(
     product_id: str,
     quantity: int,
 ) -> dict:
-    if quantity <= 0:
-        raise ValueError("quantity must be > 0")
-
-    supplier = _get_supplier_or_raise(supplier_name)
-    catalog = fetch_supplier_catalog(supplier_name)
-    product = next((p for p in catalog if p.get("id") == product_id), None)
-    if product is None:
-        raise ValueError(f"Product {product_id!r} not found in supplier catalog for {supplier_name!r}")
-
-    current_day = _current_day(db)
-    payload = {
-        "buyer": "manufacturer",
-        "product_id": product_id,
-        "quantity": quantity,
-    }
-
-    order_url = f"{supplier['url'].rstrip('/')}/api/orders"
+    """Legacy alias for :func:`services.suppliers.place_order`."""
+    supplier = _supplier_or_raise(supplier_name)
+    current_day = _read_current_day(db)
     try:
-        with httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS) as client:
-            response = client.post(order_url, json=payload)
-            response.raise_for_status()
-            provider_order = response.json()
-    except httpx.RequestError as exc:
-        message = f"Provider '{supplier_name}' is unreachable at {supplier['url']}: {exc}"
-        _log_provider_error(db, current_day, supplier_name, message)
-        db.commit()
-        raise RuntimeError(message) from exc
-    except httpx.HTTPStatusError as exc:
-        message = (
-            f"Provider '{supplier_name}' returned HTTP {exc.response.status_code} for /api/orders"
+        return place_order(
+            db,
+            provider_url=supplier["url"],
+            supplier_name=supplier_name,
+            product_id=product_id,
+            quantity=quantity,
+            current_day=current_day,
         )
-        _log_provider_error(db, current_day, supplier_name, message)
-        db.commit()
-        raise RuntimeError(message) from exc
-
-    outbound = OutboundPurchaseOrderRow(
-        id=str(uuid.uuid4()),
-        provider_name=supplier_name,
-        provider_order_id=provider_order["id"],
-        product_name=product.get("name", product_id),
-        quantity=int(provider_order["quantity"]),
-        placed_day=int(provider_order["placed_day"]),
-        expected_delivery_day=int(provider_order["expected_delivery_day"]),
-        status=provider_order["status"],
-    )
-    db.add(outbound)
-    db.add(
-        EventRow(
-            day=current_day,
-            event_type="OUTBOUND_PURCHASE_CREATED",
-            entity_type="outbound_purchase_order",
-            entity_id=outbound.id,
-            description=(
-                f"Day {current_day}: Outbound purchase created with {supplier_name} "
-                f"for {outbound.quantity}x {outbound.product_name}; "
-                f"provider order {outbound.provider_order_id}"
-            ),
-            event_metadata={
-                "provider_name": supplier_name,
-                "provider_order_id": outbound.provider_order_id,
-                "product_id": product_id,
-                "product_name": outbound.product_name,
-                "quantity": outbound.quantity,
-                "expected_delivery_day": outbound.expected_delivery_day,
-            },
-        )
-    )
-    db.commit()
-    db.refresh(outbound)
-    return _serialize_outbound(outbound)
+    except ProviderError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def list_outbound_purchase_orders(db: Session) -> list[dict]:
-    rows = (
-        db.query(OutboundPurchaseOrderRow)
-        .order_by(OutboundPurchaseOrderRow.placed_day, OutboundPurchaseOrderRow.id)
-        .all()
-    )
-    return [_serialize_outbound(row) for row in rows]
+    """Legacy alias returning rows in the old field shape.
+
+    The Week 5 API expects ``provider_name`` (not ``supplier_name``) on
+    each row.  We translate here so the old response model in
+    ``main.py`` keeps validating.
+    """
+    rows = list_purchase_orders(db)
+    return [_legacy_shape(row) for row in rows]
 
 
 def sync_outbound_purchase_orders(db: Session, day: int) -> None:
-    rows = (
-        db.query(OutboundPurchaseOrderRow)
-        .filter(OutboundPurchaseOrderRow.status != "delivered")
-        .all()
-    )
-    if not rows:
-        return
+    """Legacy alias: delegate to :func:`check_deliveries`.
 
-    providers = {entry["name"]: entry for entry in list_configured_suppliers()}
-
-    for outbound in rows:
-        supplier = providers.get(outbound.provider_name)
-        if supplier is None:
-            _log_provider_error(
-                db,
-                day,
-                outbound.provider_name,
-                f"No configured URL found for provider '{outbound.provider_name}'",
-            )
-            continue
-
-        order_url = (
-            f"{supplier['url'].rstrip('/')}/api/orders/{outbound.provider_order_id}"
-        )
-        try:
-            with httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS) as client:
-                response = client.get(order_url)
-                response.raise_for_status()
-                provider_order = response.json()
-        except httpx.RequestError as exc:
-            _log_provider_error(
-                db,
-                day,
-                outbound.provider_name,
-                (
-                    f"Failed polling provider order {outbound.provider_order_id} "
-                    f"at {supplier['url']}: {exc}"
-                ),
-            )
-            continue
-        except httpx.HTTPStatusError as exc:
-            _log_provider_error(
-                db,
-                day,
-                outbound.provider_name,
-                (
-                    f"Provider returned HTTP {exc.response.status_code} while polling "
-                    f"order {outbound.provider_order_id}"
-                ),
-            )
-            continue
-
-        provider_status = provider_order.get("status", outbound.status)
-        outbound.status = provider_status
-
-        if provider_status != "delivered":
-            continue
-
-        part = db.query(ProductRow).filter(ProductRow.name == outbound.product_name).first()
-        if part is None:
-            _log_provider_error(
-                db,
-                day,
-                outbound.provider_name,
-                (
-                    f"Delivered provider order {outbound.provider_order_id} could not be "
-                    f"mapped to local product {outbound.product_name!r}"
-                ),
-            )
-            continue
-
-        part.current_stock += outbound.quantity
-        db.add(
-            EventRow(
-                day=day,
-                event_type="OUTBOUND_PURCHASE_DELIVERED",
-                entity_type="outbound_purchase_order",
-                entity_id=outbound.id,
-                description=(
-                    f"Day {day}: Provider delivery received from {outbound.provider_name} — "
-                    f"+{outbound.quantity}x {outbound.product_name}"
-                ),
-                event_metadata={
-                    "provider_name": outbound.provider_name,
-                    "provider_order_id": outbound.provider_order_id,
-                    "product_name": outbound.product_name,
-                    "quantity_received": outbound.quantity,
-                    "new_stock": part.current_stock,
-                },
-            )
-        )
+    The old signature accepted a ``day`` argument but the new service
+    derives it from ``factory_config`` itself, so the parameter is
+    accepted and ignored.
+    """
+    del day  # kept for source-compatibility with old call sites
+    check_deliveries(db)
 
 
-def _load_provider_config() -> dict:
-    if not _PROVIDER_CONFIG.exists():
-        raise RuntimeError(f"Provider config not found: {_PROVIDER_CONFIG}")
-    return json.loads(_PROVIDER_CONFIG.read_text())
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
-def _get_supplier_or_raise(supplier_name: str) -> dict[str, str]:
-    suppliers = list_configured_suppliers()
-    supplier = next((item for item in suppliers if item.get("name") == supplier_name), None)
-    if supplier is None:
-        raise ValueError(f"Unknown supplier: {supplier_name!r}")
-    return supplier
+def _supplier_or_raise(name: str) -> dict[str, str]:
+    for entry in list_providers():
+        if entry["name"] == name:
+            return entry
+    raise ValueError(f"Unknown supplier: {name!r}")
 
 
-def _current_day(db: Session) -> int:
+def _read_current_day(db: Session) -> int:
     row = db.query(FactoryConfigRow).filter(FactoryConfigRow.key == "current_day").first()
     return int(row.value) if row else 0
 
 
-def _serialize_outbound(row: OutboundPurchaseOrderRow) -> dict:
+def _legacy_shape(row: dict) -> dict:
+    """Translate ``services.suppliers``' shape to the Week 5 API response shape."""
     return {
-        "id": row.id,
-        "provider_name": row.provider_name,
-        "provider_order_id": row.provider_order_id,
-        "product_name": row.product_name,
-        "quantity": row.quantity,
-        "placed_day": row.placed_day,
-        "expected_delivery_day": row.expected_delivery_day,
-        "status": row.status,
+        "id": row["id"],
+        "provider_name": row["supplier_name"],
+        "provider_order_id": row["provider_order_id"],
+        "product_name": row["product_name"],
+        "quantity": row["quantity"],
+        "placed_day": row["placed_day"],
+        "expected_delivery_day": row["expected_delivery_day"],
+        "status": row["status"],
     }
 
 
-def _log_provider_error(db: Session, day: int, provider_name: str, detail: str) -> None:
-    db.add(
-        EventRow(
-            day=day,
-            event_type="PROVIDER_SYNC_ERROR",
-            entity_type="provider",
-            entity_id=provider_name,
-            description=detail,
-            event_metadata={"provider_name": provider_name, "detail": detail},
-        )
-    )
+__all__ = [
+    "ProviderError",
+    "ProviderHTTPError",
+    "ProviderUnreachableError",
+    "create_outbound_purchase",
+    "fetch_supplier_catalog",
+    "list_configured_suppliers",
+    "list_outbound_purchase_orders",
+    "sync_outbound_purchase_orders",
+]
