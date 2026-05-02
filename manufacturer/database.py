@@ -244,3 +244,45 @@ def get_db() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# Week 7 additions — sales orders, finished printer stock, wholesale prices
+# ---------------------------------------------------------------------------
+
+
+class SalesOrderRow(Base):
+    """Inbound order received from a retailer (Week 7)."""
+
+    __tablename__ = "sales_orders"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    retailer_name = Column(String, nullable=False)
+    model = Column(String, nullable=False)
+    quantity = Column(Integer, nullable=False)
+    unit_price = Column(Float, nullable=False, default=0.0)
+    total_price = Column(Float, nullable=False, default=0.0)
+    status = Column(String, nullable=False, default="pending")
+    placed_day = Column(Integer, nullable=True)
+    released_day = Column(Integer, nullable=True)
+    shipped_day = Column(Integer, nullable=True)
+    delivered_day = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class FinishedPrinterStockRow(Base):
+    """Finished printer inventory — output of manufacturing, input to sales (Week 7)."""
+
+    __tablename__ = "finished_printer_stock"
+
+    model = Column(String, primary_key=True)
+    quantity = Column(Integer, default=0, nullable=False)
+
+
+class WholesalePriceRow(Base):
+    """Wholesale price for a finished printer model (Week 7)."""
+
+    __tablename__ = "wholesale_prices"
+
+    model = Column(String, primary_key=True)
+    price = Column(Float, nullable=False)

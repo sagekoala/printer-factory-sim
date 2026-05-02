@@ -494,3 +494,156 @@ def api_create_outbound_purchase(
 def api_list_outbound_purchases(db: Session = Depends(get_db)) -> list[OutboundPurchaseOrderResponse]:
     rows = list_outbound_purchase_orders(db)
     return [OutboundPurchaseOrderResponse(**row) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# Week 7 additions — sales orders, finished stock, wholesale prices, turn-engine
+# ---------------------------------------------------------------------------
+
+try:
+    from manufacturer.database import FinishedPrinterStockRow, SalesOrderRow, WholesalePriceRow
+    from manufacturer.sales_orders import (
+        advance_sales_orders,
+        create_sales_order,
+        ensure_defaults,
+        get_capacity_info,
+        get_finished_stock,
+        get_production_status,
+        get_sales_order as _get_sales_order,
+        get_wholesale_prices,
+        list_sales_orders,
+        release_to_production as _release_to_production,
+        set_wholesale_price as _set_wholesale_price,
+    )
+except ModuleNotFoundError:
+    from database import FinishedPrinterStockRow, SalesOrderRow, WholesalePriceRow  # type: ignore
+    from sales_orders import (  # type: ignore
+        advance_sales_orders,
+        create_sales_order,
+        ensure_defaults,
+        get_capacity_info,
+        get_finished_stock,
+        get_production_status,
+        get_sales_order as _get_sales_order,
+        get_wholesale_prices,
+        list_sales_orders,
+        release_to_production as _release_to_production,
+        set_wholesale_price as _set_wholesale_price,
+    )
+
+
+class CreateSalesOrderRequest(BaseModel):
+    retailer_name: str
+    model: str
+    quantity: int
+
+
+class SetWholesalePriceRequest(BaseModel):
+    price: float
+
+
+@app.get("/api/catalog", tags=["Sales"])
+def api_get_catalog(db: Session = Depends(get_db)) -> list[dict]:
+    ensure_defaults(db)
+    return get_wholesale_prices(db)
+
+
+@app.get("/api/stock", tags=["Sales"])
+def api_get_finished_stock(db: Session = Depends(get_db)) -> list[dict]:
+    ensure_defaults(db)
+    return get_finished_stock(db)
+
+
+@app.post("/api/orders", tags=["Sales"])
+def api_create_sales_order(
+    payload: CreateSalesOrderRequest,
+    db: Session = Depends(get_db),
+) -> dict:
+    ensure_defaults(db)
+    day_row = db.query(FactoryConfigRow).filter(FactoryConfigRow.key == "current_day").first()
+    current_day = int(day_row.value) if day_row else 0
+    try:
+        return create_sales_order(
+            db,
+            retailer_name=payload.retailer_name,
+            model=payload.model,
+            quantity=payload.quantity,
+            placed_day=current_day,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/orders", tags=["Sales"])
+def api_list_sales_orders(
+    status: Optional[str] = Query(default=None),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    return list_sales_orders(db, status=status)
+
+
+@app.get("/api/orders/{order_id}", tags=["Sales"])
+def api_get_sales_order(order_id: str, db: Session = Depends(get_db)) -> dict:
+    order = _get_sales_order(db, order_id)
+    if order is None:
+        raise HTTPException(status_code=404, detail=f"Sales order {order_id!r} not found")
+    return order
+
+
+@app.post("/api/day/advance", tags=["Turn Engine"])
+def api_day_advance(db: Session = Depends(get_db)) -> dict:
+    ensure_defaults(db)
+    day_row = db.query(FactoryConfigRow).filter(FactoryConfigRow.key == "current_day").first()
+    previous_day = int(day_row.value) if day_row else 0
+
+    before_count = (
+        db.query(ManufacturingOrderRow)
+        .filter(ManufacturingOrderRow.status == ManufacturingOrderStatus.completed.value)
+        .count()
+    )
+
+    new_day = advance_day(db)
+
+    after_count = (
+        db.query(ManufacturingOrderRow)
+        .filter(ManufacturingOrderRow.status == ManufacturingOrderStatus.completed.value)
+        .count()
+    )
+
+    newly_produced = max(0, after_count - before_count)
+    advance_sales_orders(db, new_day, newly_produced)
+
+    return {"previous_day": previous_day, "current_day": new_day}
+
+
+@app.get("/api/day/current", tags=["Turn Engine"])
+def api_day_current(db: Session = Depends(get_db)) -> dict:
+    day_row = db.query(FactoryConfigRow).filter(FactoryConfigRow.key == "current_day").first()
+    return {"current_day": int(day_row.value) if day_row else 0}
+
+
+@app.get("/api/capacity", tags=["Sales"])
+def api_get_capacity(db: Session = Depends(get_db)) -> dict:
+    return get_capacity_info(db)
+
+
+@app.get("/api/prices", tags=["Sales"])
+def api_get_prices(db: Session = Depends(get_db)) -> list[dict]:
+    ensure_defaults(db)
+    return get_wholesale_prices(db)
+
+
+@app.post("/api/prices/{model}", tags=["Sales"])
+def api_set_price(
+    model: str,
+    payload: SetWholesalePriceRequest,
+    db: Session = Depends(get_db),
+) -> dict:
+    day_row = db.query(FactoryConfigRow).filter(FactoryConfigRow.key == "current_day").first()
+    current_day = int(day_row.value) if day_row else 0
+    return _set_wholesale_price(db, model, payload.price, current_day)
+
+
+@app.get("/api/production/status", tags=["Sales"])
+def api_production_status(db: Session = Depends(get_db)) -> dict:
+    return get_production_status(db)

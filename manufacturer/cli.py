@@ -307,3 +307,128 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# ---------------------------------------------------------------------------
+# Week 7 additions — sales orders, production, capacity, wholesale prices
+# ---------------------------------------------------------------------------
+
+try:
+    from manufacturer.database import FinishedPrinterStockRow, SalesOrderRow, WholesalePriceRow
+    from manufacturer.sales_orders import (
+        get_capacity_info,
+        get_production_status,
+        list_sales_orders as _list_sales_orders,
+        get_sales_order as _get_sales_order,
+        release_to_production as _release_to_production,
+        get_wholesale_prices,
+        set_wholesale_price as _set_wholesale_price,
+        get_finished_stock,
+        ensure_defaults,
+    )
+except ModuleNotFoundError:
+    from database import FinishedPrinterStockRow, SalesOrderRow, WholesalePriceRow  # type: ignore
+    from sales_orders import (  # type: ignore
+        get_capacity_info,
+        get_production_status,
+        list_sales_orders as _list_sales_orders,
+        get_sales_order as _get_sales_order,
+        release_to_production as _release_to_production,
+        get_wholesale_prices,
+        set_wholesale_price as _set_wholesale_price,
+        get_finished_stock,
+        ensure_defaults,
+    )
+
+sales_app = typer.Typer(help="Inbound sales order commands (from retailers)")
+production_app = typer.Typer(help="Production management commands")
+price_app = typer.Typer(help="Wholesale pricing commands")
+
+app.add_typer(sales_app, name="sales")
+app.add_typer(production_app, name="production")
+app.add_typer(price_app, name="price")
+
+
+@sales_app.command("orders", help="List sales orders received from retailers.")
+def sales_orders(
+    status: Optional[str] = typer.Option(None, "--status", help="Filter by status."),
+) -> None:
+    init_db()
+    db = SessionLocal()
+    try:
+        ensure_defaults(db)
+        _emit(_list_sales_orders(db, status=status))
+    finally:
+        db.close()
+
+
+@sales_app.command("order", help="Show details of a sales order.")
+def sales_order(order_id: str) -> None:
+    init_db()
+    db = SessionLocal()
+    try:
+        order = _get_sales_order(db, order_id)
+        if order is None:
+            typer.echo(f"Sales order {order_id!r} not found", err=True)
+            raise typer.Exit(1)
+        _emit(order)
+    finally:
+        db.close()
+
+
+@production_app.command("release", help="Release a pending sales order to production.")
+def production_release(order_id: str) -> None:
+    init_db()
+    db = SessionLocal()
+    try:
+        current_day = _get_current_day(db)
+        ok, msg = _release_to_production(db, order_id, current_day)
+        if not ok:
+            typer.echo(msg, err=True)
+            raise typer.Exit(1)
+        _emit({"order_id": order_id, "status": "released", "day": current_day})
+    finally:
+        db.close()
+
+
+@production_app.command("status", help="Show what is currently being produced.")
+def production_status() -> None:
+    init_db()
+    db = SessionLocal()
+    try:
+        ensure_defaults(db)
+        _emit(get_production_status(db))
+    finally:
+        db.close()
+
+
+@app.command("capacity", help="Show daily production capacity and utilisation.")
+def capacity() -> None:
+    init_db()
+    db = SessionLocal()
+    try:
+        _emit(get_capacity_info(db))
+    finally:
+        db.close()
+
+
+@price_app.command("list", help="List wholesale prices for finished printers.")
+def price_list() -> None:
+    init_db()
+    db = SessionLocal()
+    try:
+        ensure_defaults(db)
+        _emit(get_wholesale_prices(db))
+    finally:
+        db.close()
+
+
+@price_app.command("set", help="Set wholesale price for a printer model.")
+def price_set(model: str, price: float) -> None:
+    init_db()
+    db = SessionLocal()
+    try:
+        current_day = _get_current_day(db)
+        _emit(_set_wholesale_price(db, model, price, current_day))
+    finally:
+        db.close()
