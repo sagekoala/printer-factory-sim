@@ -1,0 +1,8 @@
+{
+  "catalog": [
+    {"model": "Pro 3D Printer", "retail_price": 1300.0}
+  ],
+  "stock": [
+    {"model": "Pro 3D Printer", "quantity": 5}
+  ]
+}
