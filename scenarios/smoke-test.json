@@ -1,0 +1,13 @@
+{
+  "scenario_name": "smoke-test",
+  "base_demand": {"mean": 4, "variance": 1},
+  "events": [
+    {
+      "name": "normal",
+      "start_day": 1,
+      "end_day": 10,
+      "demand_modifier": 1.0,
+      "description": "Steady state"
+    }
+  ]
+}

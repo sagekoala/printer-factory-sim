@@ -1,0 +1,24 @@
+{
+  "retailers": [
+    {
+      "name": "PrinterWorld",
+      "url": "http://localhost:8003",
+      "path": "retailer",
+      "skill": null
+    }
+  ],
+  "manufacturer": {
+    "name": "Factory",
+    "url": "http://localhost:8002",
+    "path": "manufacturer",
+    "skill": "skills/manufacturer-manager.md"
+  },
+  "providers": [
+    {
+      "name": "ChipSupply Co",
+      "url": "http://localhost:8001",
+      "path": "provider",
+      "skill": null
+    }
+  ]
+}
