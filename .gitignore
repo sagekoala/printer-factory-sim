@@ -5,3 +5,4 @@ __pycache__/
 .fuse_hidden*
 *.egg-info/
 logs/
+notes
