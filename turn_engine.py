@@ -57,6 +57,19 @@ def generate_customer_orders(retailer_url: str, signal: dict) -> None:
                 print(f"[WARN] Could not place customer order at {retailer_url}: {exc}")
 
 
+def _claude_cmd() -> list[str]:
+    """Return the correct command to invoke claude on this platform."""
+    import shutil, sys
+    # shutil.which resolves .CMD/.PS1 on Windows; use the full resolved path
+    full = shutil.which("claude")
+    if full:
+        if sys.platform == "win32" and full.lower().endswith((".cmd", ".bat")):
+            return ["cmd", "/c", full]
+        return [full]
+    # Last-resort fallback
+    return ["claude"]
+
+
 def run_agent_or_stub(role: str, skill_path: str | None, context: dict, cwd: str) -> None:
     if skill_path is None:
         print(f"[stub] {role} would make decisions here")
@@ -64,26 +77,36 @@ def run_agent_or_stub(role: str, skill_path: str | None, context: dict, cwd: str
 
     day = context.get("day", 0)
     prompt = (
-        f"Read the skill file at {skill_path}.\n"
-        f"Today's context: {json.dumps(context)}\n"
-        "Execute your daily decisions following the skill's decision framework.\n"
-        "Do NOT advance the day - the turn engine does that.\n"
+        f"You are acting as the {role} in a 3D printer supply chain simulation.\n\n"
+        f"Read the skill file at {skill_path} to understand your role, available commands, "
+        f"and decision framework.\n\n"
+        f"Today is day {day}. Market context: {json.dumps(context)}\n\n"
+        "INSTRUCTIONS: Execute your daily decisions NOW by running the actual CLI commands "
+        "from the skill file. Do not describe what you would do — actually run the commands, "
+        "read their output, and take action based on what you see.\n\n"
+        "Follow the decision framework step by step:\n"
+        "1. Run the state-check commands and summarise what you see.\n"
+        "2. Take any needed actions (release production, place purchase orders, set prices).\n"
+        "3. Print a 3-5 bullet summary of what you did and why.\n\n"
+        "CONSTRAINT: Do NOT call `day advance` — the turn engine handles that."
     )
 
     logs_dir = Path("logs")
     logs_dir.mkdir(exist_ok=True)
 
+    cmd = _claude_cmd() + ["--print", "--dangerously-skip-permissions", prompt]
     try:
         result = subprocess.run(
-            ["claude", "--print", "--prompt", prompt],
+            cmd,
+            input="",           # prevent stdin-wait warning
             capture_output=True,
             text=True,
             cwd=cwd,
-            timeout=180,
+            timeout=300,
         )
-        output = result.stdout
+        output = result.stdout or result.stderr
     except subprocess.TimeoutExpired:
-        output = f"[TIMEOUT] {role} agent timed out after 180s"
+        output = f"[TIMEOUT] {role} agent timed out after 300s"
     except FileNotFoundError:
         output = f"[ERROR] claude CLI not found — stub mode"
 

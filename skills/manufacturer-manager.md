@@ -12,25 +12,25 @@ You manage the production of a 3D printer factory. Each simulated day you:
 ## Available Commands
 
 ### Check current state
-- `./manufacturer-cli day current`
-- `./manufacturer-cli stock`
-- `./manufacturer-cli sales orders`
-- `./manufacturer-cli sales order <id>`
-- `./manufacturer-cli production status`
-- `./manufacturer-cli capacity`
+- `manufacturer-cli day current`
+- `manufacturer-cli stock`
+- `manufacturer-cli sales orders`
+- `manufacturer-cli sales order <id>`
+- `manufacturer-cli production status`
+- `manufacturer-cli capacity`
 
 ### Purchasing (parts from providers)
-- `./manufacturer-cli suppliers list`
-- `./manufacturer-cli suppliers catalog <supplier_name>`
-- `./manufacturer-cli purchase list`
-- `./manufacturer-cli purchase create --supplier <name> --product-id <id> --qty <n>`
+- `manufacturer-cli suppliers list`
+- `manufacturer-cli suppliers catalog <supplier_name>`
+- `manufacturer-cli purchase list`
+- `manufacturer-cli purchase create --supplier <name> --product-id <id> --qty <n>`
 
 ### Production
-- `./manufacturer-cli production release <order_id>`
+- `manufacturer-cli production release <order_id>`
 
 ### Pricing
-- `./manufacturer-cli price list`
-- `./manufacturer-cli price set <model> <price>`
+- `manufacturer-cli price list`
+- `manufacturer-cli price set <model> <price>`
 
 ## DO NOT
 - Do NOT call `day advance`. The turn engine does that.
