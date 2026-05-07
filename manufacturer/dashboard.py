@@ -26,6 +26,15 @@ try:
     )
     from manufacturer.models import EventType, ManufacturingOrderStatus, PurchaseOrderStatus
     from manufacturer.simulation import advance_day, create_purchase_order, release_manufacturing_order
+    from manufacturer.services.suppliers import (
+        ProviderError,
+        ProviderHTTPError,
+        ProviderUnreachableError,
+        get_catalog,
+        list_providers,
+        list_purchase_orders,
+        place_order,
+    )
 except ModuleNotFoundError:
     from database import (
         BOMEntryRow,
@@ -41,6 +50,15 @@ except ModuleNotFoundError:
     )
     from models import EventType, ManufacturingOrderStatus, PurchaseOrderStatus
     from simulation import advance_day, create_purchase_order, release_manufacturing_order
+    from services.suppliers import (
+        ProviderError,
+        ProviderHTTPError,
+        ProviderUnreachableError,
+        get_catalog,
+        list_providers,
+        list_purchase_orders,
+        place_order,
+    )
 
 # ---------------------------------------------------------------------------
 # One-time setup
@@ -361,8 +379,8 @@ st.divider()
 # Tabs
 # ---------------------------------------------------------------------------
 
-overview_tab, procurement_tab, orders_tab, analytics_tab, system_tab = st.tabs(
-    ["Overview", "Procurement Tracker", "Orders", "Analytics", "System"]
+overview_tab, procurement_tab, orders_tab, analytics_tab, system_tab, external_tab = st.tabs(
+    ["Overview", "Procurement Tracker", "Orders", "Analytics", "System", "External Suppliers"]
 )
 
 # ── Overview tab ────────────────────────────────────────────────────────────
@@ -952,3 +970,112 @@ with system_tab:
                     except Exception as exc:
                         db.rollback()
                         st.error(f"Restore failed — database unchanged: {exc}")
+
+
+# ── External Suppliers tab ──────────────────────────────────────────────────
+
+with external_tab:
+
+    st.subheader("Order from External Provider")
+    st.caption("Browse the external provider catalog and place purchase orders.")
+
+    providers = list_providers()
+
+    if not providers:
+        st.warning("No external providers configured. Check provider_config.json.")
+    else:
+        # Select provider
+        selected_provider = st.selectbox(
+            "Provider",
+            options=providers,
+            format_func=lambda p: f"{p['name']} ({p['url']})",
+        )
+
+        # Load catalog from provider
+        catalog = None
+        try:
+            catalog = get_catalog(selected_provider["url"])
+        except (ProviderUnreachableError, ProviderHTTPError) as exc:
+            st.error(f"Failed to load catalog: {exc}")
+
+        if catalog:
+            # Select product from catalog
+            selected_product = st.selectbox(
+                "Product",
+                options=catalog,
+                format_func=lambda p: (
+                    f"{p.get('name', 'Unknown')} — Tier {p.get('tier', '?')} "
+                    f"@ ${p.get('unit_price', 0)}/unit"
+                ),
+            )
+
+            # Select quantity
+            quantity = st.number_input(
+                "Quantity",
+                min_value=1,
+                value=1,
+                step=1,
+            )
+
+            # Show estimated cost
+            unit_price = float(selected_product.get("unit_price", 0))
+            total_cost = unit_price * quantity
+            st.caption(
+                f"Estimated cost: **${total_cost:,.2f}**  |  "
+                f"Expected delivery: **{selected_product.get('lead_time_days', '?')} day(s)**"
+            )
+
+            # Place order button
+            if st.button("Place Order with Provider", type="primary"):
+                try:
+                    current_day = _current_day()
+                    order_result = place_order(
+                        db,
+                        provider_url=selected_provider["url"],
+                        supplier_name=selected_provider["name"],
+                        product_id=selected_product.get("id", ""),
+                        quantity=int(quantity),
+                        current_day=current_day,
+                    )
+                    db.expire_all()
+                    st.success(
+                        f"Order placed! {quantity}x **{selected_product.get('name', 'Product')}** "
+                        f"from {selected_provider['name']}. "
+                        f"Expected delivery in {selected_product.get('lead_time_days', '?')} day(s)."
+                    )
+                    st.rerun()
+                except (ProviderError, RuntimeError) as exc:
+                    st.error(f"Failed to place order: {exc}")
+
+        st.divider()
+
+        # Show outbound purchase order history
+        st.subheader("Outbound Purchase Orders")
+        st.caption("All orders placed with external providers.")
+
+        outbound_orders = list_purchase_orders(db)
+        if outbound_orders:
+            orders_df = pd.DataFrame(outbound_orders)
+            # Select columns to display
+            display_cols = [
+                "provider_name", "product_name", "quantity", "unit_price",
+                "status", "placed_day", "expected_delivery_day", "delivered_day"
+            ]
+            display_cols = [c for c in display_cols if c in orders_df.columns]
+            st.dataframe(
+                orders_df[display_cols],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "provider_name": st.column_config.TextColumn("Provider"),
+                    "product_name": st.column_config.TextColumn("Product"),
+                    "quantity": st.column_config.NumberColumn("Qty"),
+                    "unit_price": st.column_config.NumberColumn("Price/Unit", format="$%.2f"),
+                    "status": st.column_config.TextColumn("Status"),
+                    "placed_day": st.column_config.NumberColumn("Placed Day"),
+                    "expected_delivery_day": st.column_config.NumberColumn("Expected Day"),
+                    "delivered_day": st.column_config.NumberColumn("Delivered Day"),
+                },
+            )
+        else:
+            st.info("No orders placed with external providers yet.")
