@@ -1,0 +1,73 @@
+@import "tailwindcss";
+
+/* Tailwind v4: design tokens */
+@theme {
+  --color-bg: #0a0a0a;
+  --color-surface: #111113;
+  --color-surface-2: #16161a;
+  --color-border: #1f1f23;
+  --color-border-strong: #2a2a30;
+  --color-muted: #6b7280;
+
+  --color-provider: #22c55e;     /* green */
+  --color-manufacturer: #3b82f6; /* electric blue */
+  --color-retailer: #f97316;     /* orange */
+
+  --color-ok: #22c55e;
+  --color-warn: #f59e0b;
+  --color-danger: #ef4444;
+
+  --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  background: var(--color-bg);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-feature-settings: "ss01", "ss02";
+}
+
+/* Numbers, IDs and code-like tokens use a monospace font */
+.mono { font-family: var(--font-mono); }
+
+/* Animated dashed line for active flow arrows */
+@keyframes dash-flow {
+  to { stroke-dashoffset: -24; }
+}
+.flow-active {
+  stroke-dasharray: 6 6;
+  animation: dash-flow 1.2s linear infinite;
+}
+
+/* Subtle pulse for the live status dot */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.live-dot { animation: pulse-dot 1.6s ease-in-out infinite; }
+
+/* Custom thin scrollbar for the event feed */
+.feed-scroll::-webkit-scrollbar { width: 6px; }
+.feed-scroll::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 3px;
+}
+.feed-scroll::-webkit-scrollbar-track { background: transparent; }
+
+/* Brief flash applied when a tracked numeric value changes between refreshes.
+   Drives the "live monitoring" feel: stock drops, day ticks, gauge moves
+   — every change is visually acknowledged without distracting the eye. */
+@keyframes value-flash {
+  0%   { background-color: rgba(245, 158, 11, 0.30); }
+  60%  { background-color: rgba(245, 158, 11, 0.10); }
+  100% { background-color: transparent; }
+}
+.value-flash {
+  animation: value-flash 1.4s ease-out;
+  border-radius: 2px;
+  padding: 0 3px;
+  margin: 0 -3px;
+}

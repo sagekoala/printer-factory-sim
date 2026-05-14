@@ -1,0 +1,25 @@
+{
+  "name": "supply-chain-monitor",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Real-time monitoring dashboard for the 3D printer supply chain simulator.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "recharts": "^2.12.7"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.13",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "tailwindcss": "^4.1.13",
+    "vite": "^5.4.11"
+  }
+}

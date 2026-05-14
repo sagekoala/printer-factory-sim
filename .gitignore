@@ -1,8 +1,12 @@
 .env
 __pycache__/
 .venv/
+venv/
 *.db
+*.db.bak.*
 .fuse_hidden*
 *.egg-info/
 logs/
 notes
+.pdf
+node_modules/

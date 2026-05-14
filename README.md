@@ -89,7 +89,37 @@ streamlit run manufacturer/dashboard.py
 
 ## Running the Turn Engine
 
-With all three apps running, from the repo root:
+The turn engine orchestrates one simulated day across all three apps, generates customer demand, runs agent decisions (via Claude Code), and advances all apps in lock-step.
+
+### Prerequisites
+
+1. **Claude Code CLI installed**
+   ```bash
+   # Install from: https://claude.com/claude-code
+   # Verify:
+   claude --version
+   ```
+
+2. **All three apps running on separate ports**
+   
+   Open three terminals from the repo root and run:
+
+   ```bash
+   # Terminal 1 — Provider (port 8001)
+   uvicorn provider.api:app --reload --port 8001
+   
+   # Terminal 2 — Manufacturer (port 8002)
+   uvicorn manufacturer.main:app --reload --port 8002
+   
+   # Terminal 3 — Retailer (port 8003)
+   uvicorn retailer.main:app --reload --port 8003
+   ```
+
+   Verify all three are healthy before proceeding.
+
+### Running the Engine
+
+From the repo root (in a 4th terminal):
 
 ```bash
 python turn_engine.py config/sim.json scenarios/smoke-test.json <days>
@@ -101,18 +131,144 @@ Example — run 3 simulated days:
 python turn_engine.py config/sim.json scenarios/smoke-test.json 3
 ```
 
-What happens each day:
-1. Reads today's market signal from `scenarios/smoke-test.json`
-2. Injects customer orders at the retailer
-3. Runs manufacturer agent (Claude Code via `claude --print`) or stub
-4. Advances all three apps by one day
-5. Saves agent output to `logs/day-NNN-manufacturer.log`
+### Order of Operations per Day
 
-### Multiple retailer instances
+The turn engine executes the following steps in order:
+
+1. **Read market signal** from scenario file (`scenarios/smoke-test.json`)
+   - Demand modifier for today
+   - Any market events
+   
+2. **Generate customer demand** at each retailer
+   - Based on base demand + modifier
+   - Injected via `POST /api/orders`
+
+3. **Run retailer agents** (currently stubs, extensible to Claude Code)
+   - Fulfill customer orders from stock
+   - Place purchase orders with manufacturer if inventory low
+   - Adjust prices based on demand
+   
+4. **Run manufacturer agent** (executes Claude Code skill file)
+   - Review incoming sales orders from retailers
+   - Release orders to production if parts available
+   - Order parts from provider if stock running low
+   - Adjust wholesale prices based on demand vs capacity
+   - Output captured to `logs/day-NNN-manufacturer.log`
+
+5. **Run provider agents** (currently stubs)
+   - Process pending orders
+   - Manage stock levels
+
+6. **Advance all three apps** by one day
+   - Calls `POST /api/day/advance` on each app
+
+### Configuration Files
+
+**`config/sim.json`** — Turn engine configuration
+
+```json
+{
+  "retailers": [
+    {
+      "name": "PrinterWorld",
+      "url": "http://localhost:8003",
+      "path": "retailer",
+      "skill": "skills/retailer-manager.md"
+    }
+  ],
+  "manufacturer": {
+    "name": "Factory",
+    "url": "http://localhost:8002",
+    "path": "manufacturer",
+    "skill": "skills/manufacturer-manager.md"
+  },
+  "providers": [
+    {
+      "name": "ChipSupply Co",
+      "url": "http://localhost:8001",
+      "path": "provider",
+      "skill": "skills/provider-manager.md"
+    }
+  ]
+}
+```
+
+- **`skill: null`** → agent uses stub (prints "[stub] X would make decisions here")
+- **`skill: "path/to/file.md"`** → agent executes Claude Code via `claude --print`
+
+**`scenarios/smoke-test.json`** — Market scenario definition
+
+```json
+{
+  "scenario_name": "smoke-test",
+  "base_demand": {"mean": 4, "variance": 1},
+  "events": [
+    {
+      "name": "normal",
+      "start_day": 1,
+      "end_day": 10,
+      "demand_modifier": 1.0,
+      "description": "Steady state"
+    }
+  ]
+}
+```
+
+- `demand_modifier = 1.0` → normal demand
+- `demand_modifier > 1.5` → high demand period
+- `demand_modifier < 0.7` → low demand period
+
+### Skill Files
+
+Skill files teach Claude Code how to play a role in the simulation. Located in `skills/`:
+
+- **`manufacturer-manager.md`** — Manufacturer agent instructions
+  - How to assess state (CLI commands to run)
+  - Decision framework (5-step process)
+  - Constraints (what NOT to do)
+  - Market signal interpretation
+
+- **`retailer-manager.md`** — Retailer agent instructions
+- **`provider-manager.md`** — Provider agent instructions
+
+To add a role as an agent, point its `skill` in `config/sim.json` to the markdown file. Claude Code will execute the skill file instructions for that role each turn.
+
+### Agent Output and Logging
+
+Every time an agent runs, its output is captured and saved to:
+
+```
+logs/day-001-retailer.log
+logs/day-001-manufacturer.log
+logs/day-001-provider.log
+logs/day-002-retailer.log
+...
+```
+
+Each log file contains:
+- State assessment (what the agent saw)
+- Actions taken (what commands were run)
+- Reasoning (why each decision was made)
+- Summary (3-5 bullet points)
+
+View the logs to understand agent behavior:
 
 ```bash
-retailer-cli serve --config retailer-1.json --port 8003
-retailer-cli serve --config retailer-2.json --port 8005
+cat logs/day-001-manufacturer.log
+cat logs/day-002-retailer.log
+```
+
+### Multiple Retailer Instances
+
+To run multiple retailers (for market experiments):
+
+```bash
+retailer-cli serve --config retailer-1.json --port 8003 &
+retailer-cli serve --config retailer-2.json --port 8005 &
+
+# Update config/sim.json to include both retailers
+# Then run the engine as normal
+python turn_engine.py config/sim.json scenarios/smoke-test.json 3
 ```
 
 ---
