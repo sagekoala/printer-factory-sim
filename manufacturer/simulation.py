@@ -56,6 +56,7 @@ try:
     )
     from manufacturer.models import EventType, ManufacturingOrderStatus, PurchaseOrderStatus
     from manufacturer.services.suppliers import check_deliveries
+    from manufacturer.sales_orders import advance_sales_orders
 except ModuleNotFoundError:
     from database import (
         BOMEntryRow,
@@ -70,6 +71,7 @@ except ModuleNotFoundError:
     )
     from models import EventType, ManufacturingOrderStatus, PurchaseOrderStatus
     from services.suppliers import check_deliveries
+    from sales_orders import advance_sales_orders
 
 # ---------------------------------------------------------------------------
 # Constants (all overridable via factory_config table)
@@ -138,8 +140,9 @@ def advance_day(db: Session) -> int:
         )
 
     _deliver_purchase_orders(db, day)
-    _generate_demand(db, day)
-    _fulfill_manufacturing_orders(db, day)
+    # _generate_demand(db, day)  # Week 7: demand now comes from retailers via turn_engine
+    printers_built = _fulfill_manufacturing_orders(db, day)
+    advance_sales_orders(db, day, printers_built)
     db.commit()
     return day
 
@@ -591,7 +594,7 @@ def _generate_demand(db: Session, day: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _fulfill_manufacturing_orders(db: Session, day: int) -> None:
+def _fulfill_manufacturing_orders(db: Session, day: int) -> int:
     """Attempt to fulfil pending MOs within today's production capacity.
 
     Processes MOs oldest-first (FIFO).  For each MO:
@@ -602,12 +605,14 @@ def _fulfill_manufacturing_orders(db: Session, day: int) -> None:
     * If stock is insufficient: skips the MO and moves to the next.
 
     The loop exits early once the daily capacity ceiling is reached.
+
+    Returns the number of printers built during this day.
     """
     capacity = int(_get_config(db, "capacity_per_day", _DEFAULT_CAPACITY_PER_DAY))
     bom: list[BOMEntryRow] = db.query(BOMEntryRow).all()
 
     if not bom:
-        return  # Cannot build anything without a Bill of Materials
+        return 0  # Cannot build anything without a Bill of Materials
 
     pending_mos = (
         db.query(ManufacturingOrderRow)
@@ -678,6 +683,8 @@ def _fulfill_manufacturing_orders(db: Session, day: int) -> None:
                 "capacity": capacity,
             },
         )
+
+    return printers_built
 
 
 # ---------------------------------------------------------------------------

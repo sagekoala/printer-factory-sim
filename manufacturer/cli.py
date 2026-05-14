@@ -301,14 +301,6 @@ def import_command(file: Path) -> None:
         db.close()
 
 
-def main() -> None:
-    app()
-
-
-if __name__ == "__main__":
-    main()
-
-
 # ---------------------------------------------------------------------------
 # Week 7 additions — sales orders, production, capacity, wholesale prices
 # ---------------------------------------------------------------------------
@@ -432,3 +424,16 @@ def price_set(model: str, price: float) -> None:
         _emit(_set_wholesale_price(db, model, price, current_day))
     finally:
         db.close()
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    app()
+
+
+if __name__ == "__main__":
+    main()
