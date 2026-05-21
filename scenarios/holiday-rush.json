@@ -1,0 +1,47 @@
+{
+  "scenario_name": "holiday-rush",
+  "description": "25-day stress test. A black-friday demand spike collides with a chip shortage and a christmas rush, with deliberate overlap on days 18-20 so the engine must multiply concurrent modifiers (not just take the last event).",
+  "base_demand": {"mean": 5, "variance": 2},
+  "events": [
+    {
+      "name": "normal",
+      "start_day": 1,
+      "end_day": 10,
+      "demand_modifier": 1.0,
+      "supply_modifier": 1.0,
+      "lead_time_modifier": 1.0,
+      "price_sensitivity": "normal",
+      "description": "Calm baseline before the holidays"
+    },
+    {
+      "name": "black_friday",
+      "start_day": 11,
+      "end_day": 13,
+      "demand_modifier": 3.0,
+      "supply_modifier": 1.0,
+      "lead_time_modifier": 1.0,
+      "price_sensitivity": "high",
+      "description": "Black Friday demand spike"
+    },
+    {
+      "name": "chip_shortage",
+      "start_day": 14,
+      "end_day": 20,
+      "demand_modifier": 1.5,
+      "supply_modifier": 0.4,
+      "lead_time_modifier": 2.0,
+      "price_sensitivity": "low",
+      "description": "Global chip shortage: suppliers slow, parts scarce"
+    },
+    {
+      "name": "christmas_rush",
+      "start_day": 18,
+      "end_day": 25,
+      "demand_modifier": 2.5,
+      "supply_modifier": 0.6,
+      "lead_time_modifier": 1.0,
+      "price_sensitivity": "high",
+      "description": "Christmas buying surge stacked on top of the shortage"
+    }
+  ]
+}

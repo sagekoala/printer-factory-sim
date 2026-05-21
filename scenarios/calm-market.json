@@ -1,0 +1,17 @@
+{
+  "scenario_name": "calm-market",
+  "description": "25 days of steady, baseline demand with no shocks. Useful as a control run when comparing against more volatile scenarios.",
+  "base_demand": {"mean": 5, "variance": 2},
+  "events": [
+    {
+      "name": "normal",
+      "start_day": 1,
+      "end_day": 25,
+      "demand_modifier": 1.0,
+      "supply_modifier": 1.0,
+      "lead_time_modifier": 1.0,
+      "price_sensitivity": "normal",
+      "description": "Steady state market"
+    }
+  ]
+}
