@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p /home/mario/Documentos/DGSI/printer-factory-sim/logs)",
+      "Bash(curl -s http://localhost:8001/api/catalog)",
+      "Bash(curl -s http://localhost:8002/api/catalog)",
+      "Bash(curl -s http://localhost:8003/api/catalog)",
+      "Bash(find /home/mario -name \"python3.12\" -type f 2>/dev/null | head -5 && ls /home/mario/.local/bin/ 2>/dev/null | head -10)",
+      "Read(//home/mario/**)",
+      "Read(//home/mario/.local/**)",
+      "Read(//usr/**)",
+      "Bash(dpkg -l python3.12)"
+    ],
+    "additionalDirectories": [
+      "/home/mario/Documentos/DGSI/printer-factory-sim"
+    ]
+  }
+}
