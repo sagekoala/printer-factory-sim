@@ -1,0 +1,16 @@
+{
+  "scenario_name": "Calm Market — Stable Baseline",
+  "base_demand": {"mean": 5, "variance": 1},
+  "base_price": 400,
+  "events": [
+    {
+      "name": "normal",
+      "start_day": 1,
+      "end_day": 25,
+      "demand_modifier": 1.0,
+      "supply_modifier": 1.0,
+      "lead_time_modifier": 1.0,
+      "description": "Steady demand, no disruptions — control group"
+    }
+  ]
+}

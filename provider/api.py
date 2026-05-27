@@ -85,6 +85,10 @@ class OrderResponse(BaseModel):
     status: OrderStatus
 
 
+class AdvanceDayRequest(BaseModel):
+    lead_time_modifier: float = Field(default=1.0, ge=0.1, description="Multiplier for product lead times this day.")
+
+
 class DayAdvanceResponse(BaseModel):
     day: int
     orders_shipped: int
@@ -254,8 +258,12 @@ def api_get_order(order_id: str, db: Session = Depends(get_db)) -> dict:
     tags=["Simulation"],
     summary="Advance the simulation by one day.",
 )
-def api_day_advance(db: Session = Depends(get_db)) -> dict:
-    return advance_day(db)
+def api_day_advance(
+    body: AdvanceDayRequest | None = None,
+    db: Session = Depends(get_db),
+) -> dict:
+    modifier = body.lead_time_modifier if body is not None else 1.0
+    return advance_day(db, lead_time_modifier=modifier)
 
 
 @app.get(

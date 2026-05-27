@@ -56,12 +56,16 @@ def get_current_day(db: Session) -> int:
     return _read_current_day(db)
 
 
-def advance_day(db: Session) -> dict:
+def advance_day(db: Session, lead_time_modifier: float = 1.0) -> dict:
     """Advance the simulation by one day.
 
     See module docstring for the full step ordering.  Returns::
 
         {"day": <new_day>, "orders_shipped": int, "orders_delivered": int}
+
+    ``lead_time_modifier`` scales each product's base lead_time_days when
+    computing the expected_delivery_day for newly-shipped orders.  Values
+    above 1.0 (e.g. 2.0 during a chip shortage) extend delivery windows.
 
     The transaction commits exactly once at the end so events and state
     changes are atomic.
@@ -73,7 +77,7 @@ def advance_day(db: Session) -> dict:
     orders_delivered = _deliver_due_orders(db, new_day=new_day)
 
     # Step 2: ship pending orders that have stock.
-    orders_shipped = _process_pending_orders(db, new_day=new_day)
+    orders_shipped = _process_pending_orders(db, new_day=new_day, lead_time_modifier=lead_time_modifier)
 
     # Step 3: advance the clock and audit.
     set_current_day(db, new_day)
@@ -277,13 +281,21 @@ def _deliver_due_orders(db: Session, new_day: int) -> int:
     return len(orders)
 
 
-def _process_pending_orders(db: Session, new_day: int) -> int:
+def _process_pending_orders(db: Session, new_day: int, lead_time_modifier: float = 1.0) -> int:
     """Walk every fulfillable PENDING order through the full chain.
 
     For each pending order whose product has enough stock, the status
     moves ``PENDING -> CONFIRMED -> IN_PROGRESS -> SHIPPED`` in this
     single advance, decrementing stock and writing one event per
-    transition.  Returns the count of orders shipped.
+    transition.
+
+    ``lead_time_modifier`` rescales the product's base lead_time_days at
+    ship time, overwriting the delivery date that was estimated at order
+    placement.  This lets the turn engine inject scenario events (e.g. a
+    chip shortage with lead_time_modifier=2.0) without touching historic
+    order records.
+
+    Returns the count of orders shipped.
     """
     pending_orders = (
         db.query(OrderRow)
@@ -306,6 +318,12 @@ def _process_pending_orders(db: Session, new_day: int) -> int:
         # Decrement stock once production starts.
         if stock is not None:
             stock.quantity -= order.quantity
+
+        # Recompute delivery date at ship time using the current modifier.
+        product = db.query(ProductRow).filter(ProductRow.id == order.product_id).first()
+        base_lead = int(product.lead_time_days) if product else 1
+        scaled_lead = max(1, round(base_lead * lead_time_modifier))
+        order.expected_delivery_day = new_day + scaled_lead
 
         _transition(db, order, OrderStatus.SHIPPED, sim_day=new_day)
         order.shipped_day = new_day

@@ -51,16 +51,18 @@ def todays_signal(day: int, scenario: dict) -> dict:
     return signal
 
 
-def generate_customer_orders(retailer_url: str, signal: dict) -> None:
+def generate_customer_orders(retailer_url: str, signal: dict) -> int:
+    """Place auto-generated customer orders. Returns the number of orders placed."""
     try:
         catalog = httpx.get(f"{retailer_url}/api/catalog", timeout=8.0).json()
     except Exception as exc:
         print(f"[WARN] Could not fetch retailer catalog from {retailer_url}: {exc}")
-        return
+        return 0
 
     base = signal.get("base_demand", {"mean": 5, "variance": 2})
     modifier = signal.get("demand_modifier", 1.0)
 
+    total_placed = 0
     for item in catalog:
         model = item["model"]
         mean_orders = base["mean"] * modifier
@@ -72,8 +74,10 @@ def generate_customer_orders(retailer_url: str, signal: dict) -> None:
                     json={"customer": "auto", "model": model, "quantity": 1},
                     timeout=8.0,
                 )
+                total_placed += 1
             except Exception as exc:
                 print(f"[WARN] Could not place customer order at {retailer_url}: {exc}")
+    return total_placed
 
 
 def _claude_cmd() -> list[str]:
@@ -134,7 +138,18 @@ def run_agent_or_stub(role: str, skill_path: str | None, context: dict, cwd: str
     print(f"[{role}]\n{output}")
 
 
-def advance_all(urls: list[str]) -> None:
+# Cumulative fulfilled/backordered counts from the previous day, used to compute daily deltas.
+_prev_retailer_counts: dict[str, int] = {"fulfilled": 0, "backordered": 0}
+
+
+def advance_all(urls: list[str], lead_time_modifier: float = 1.0) -> None:
+    """Advance all apps by one day.
+
+    The provider receives ``lead_time_modifier`` in the request body so its
+    ``_process_pending_orders`` can scale delivery dates for scenario events
+    (e.g. chip shortage with lead_time_modifier=2.0).  All other apps ignore
+    the modifier and receive no body.
+    """
     for url in urls:
         try:
             httpx.post(f"{url}/api/day/advance", timeout=_TIMEOUT)
@@ -241,6 +256,7 @@ def _retailer_metrics(url: str) -> dict:
     catalog_resp = _safe_get(f"{url}/api/catalog")
     fulfilled_resp = _safe_get(f"{url}/api/orders?status=fulfilled")
     backordered_resp = _safe_get(f"{url}/api/orders?status=backordered")
+    stockout_resp = _safe_get(f"{url}/api/stock")
 
     if isinstance(stock_resp, list):
         stock = {item["model"]: item["quantity"] for item in stock_resp}
@@ -255,11 +271,19 @@ def _retailer_metrics(url: str) -> dict:
     orders_fulfilled = len(fulfilled_resp) if isinstance(fulfilled_resp, list) else None
     orders_backordered = len(backordered_resp) if isinstance(backordered_resp, list) else None
 
+    # Stockout: number of models with zero stock
+    stockouts = (
+        sum(1 for item in stock_resp if item.get("quantity", 0) == 0)
+        if isinstance(stock_resp, list)
+        else None
+    )
+
     return {
         "stock": stock,
         "retail_price": retail_price,
         "orders_fulfilled": orders_fulfilled,
         "orders_backordered": orders_backordered,
+        "stockouts": stockouts,
     }
 
 
@@ -298,11 +322,14 @@ def append_metrics(metrics: dict, path: str) -> None:
 
 
 def run_day(day: int, config: dict, scenario: dict, metrics_path: str | None = None) -> None:
+    global _prev_retailer_counts
+
     signal = todays_signal(day, scenario)
     print(f"\n{'='*60}\n DAY {day}   signal={signal}\n{'='*60}")
 
+    orders_placed = 0
     for retailer in config["retailers"]:
-        generate_customer_orders(retailer["url"], signal)
+        orders_placed += generate_customer_orders(retailer["url"], signal)
 
     for retailer in config["retailers"]:
         run_agent_or_stub("retailer", retailer.get("skill"), signal, retailer["path"])
@@ -317,16 +344,46 @@ def run_day(day: int, config: dict, scenario: dict, metrics_path: str | None = N
     for provider in config["providers"]:
         run_agent_or_stub("provider", provider.get("skill"), signal, provider["path"])
 
+    metrics = collect_metrics(day, signal, config)
     if metrics_path is not None:
-        metrics = collect_metrics(day, signal, config)
         append_metrics(metrics, metrics_path)
 
-    all_urls = (
+    # Compute daily fulfilled/backordered deltas and print turn summary.
+    retailer_m = metrics.get("retailer") or {}
+    cum_fulfilled = int(retailer_m.get("orders_fulfilled") or 0)
+    cum_backordered = int(retailer_m.get("orders_backordered") or 0)
+    daily_fulfilled = cum_fulfilled - _prev_retailer_counts["fulfilled"]
+    daily_backordered = cum_backordered - _prev_retailer_counts["backordered"]
+    _prev_retailer_counts = {"fulfilled": cum_fulfilled, "backordered": cum_backordered}
+
+    event_names = ", ".join(e["name"] for e in signal.get("events", [])) or "normal"
+    stockouts = int((metrics.get("retailer") or {}).get("stockouts") or 0)
+    print(
+        f"\n--- Day {day} summary [{event_names}]: "
+        f"{orders_placed} customer orders / "
+        f"{daily_fulfilled} fulfilled / "
+        f"{daily_backordered} backordered / "
+        f"{stockouts} stockout(s) ---"
+    )
+
+    non_provider_urls = (
         [r["url"] for r in config["retailers"]]
         + [config["manufacturer"]["url"]]
-        + [p["url"] for p in config["providers"]]
     )
-    advance_all(all_urls)
+    advance_all(non_provider_urls)
+
+    # Advance each provider with the scenario's lead_time_modifier so that
+    # events like chip shortages actually extend delivery windows.
+    lead_time_mod = signal.get("lead_time_modifier", 1.0)
+    for provider in config["providers"]:
+        try:
+            httpx.post(
+                f"{provider['url']}/api/day/advance",
+                json={"lead_time_modifier": lead_time_mod},
+                timeout=_TIMEOUT,
+            )
+        except Exception as exc:
+            print(f"[WARN] Could not advance provider {provider['url']}: {exc}")
 
 
 if __name__ == "__main__":

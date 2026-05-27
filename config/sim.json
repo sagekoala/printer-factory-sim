@@ -4,7 +4,7 @@
       "name": "PrinterWorld",
       "url": "http://localhost:8003",
       "path": "retailer",
-      "skill": "skills/retailer-manager.md"
+      "skill": "skills/retail-manager.md"
     }
   ],
   "manufacturer": {
