@@ -58,7 +58,7 @@ def _sync_purchase_orders(db: Session, day: int, manufacturer_url: str) -> None:
     active = (
         db.query(PurchaseOrderRow)
         .filter(
-            PurchaseOrderRow.status.in_(["pending", "confirmed", "in_progress", "shipped"]),
+            PurchaseOrderRow.status.in_(["pending", "confirmed", "in_progress", "shipped", "released"]),
             PurchaseOrderRow.manufacturer_order_id.isnot(None),
         )
         .all()

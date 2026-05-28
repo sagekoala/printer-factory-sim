@@ -1,8 +1,8 @@
-# Project: 3D Printer Production Simulator (Week 7)
+# Project: 3D Printer Production Simulator (Week 8)
 
 ## Current State
 
-The repository now contains **three independent FastAPI + SQLite applications** that communicate over HTTP, plus a **turn engine** that orchestrates them and a **skill file** for the manufacturer agent.
+The repository contains **three independent FastAPI + SQLite applications** that communicate over HTTP, a **turn engine** that orchestrates them, and **three skill files** for all agent roles.
 
 - **Provider app** (`provider/`) on **port 8001**
 	- Simulates external parts suppliers and order fulfilment.
@@ -12,9 +12,7 @@ The repository now contains **three independent FastAPI + SQLite applications** 
 - **Manufacturer app** (`manufacturer/`) on **port 8002**
 	- Simulates factory demand, inventory consumption, production, and local persistence.
 	- Polls provider orders and reconciles delivered quantities into local inventory.
-	- **Week 7 additions (additive only):** accepts inbound sales orders from retailers,
-	  tracks finished printer stock, exposes wholesale prices, and adds turn-engine-compatible
-	  `/api/day/advance` and `/api/day/current` endpoints.
+	- Accepts inbound sales orders from retailers, tracks finished printer stock, exposes wholesale prices.
 	- CLI entrypoint: `manufacturer-cli`
 
 - **Retailer app** (`retailer/`) on **port 8003**
@@ -26,11 +24,38 @@ The repository now contains **three independent FastAPI + SQLite applications** 
 - **Turn engine** (`turn_engine.py`)
 	- Orchestrates one simulated day across all three apps.
 	- Generates deterministic customer demand from a scenario file.
-	- Calls Claude Code (`claude --print`) for agent roles; falls back to stubs.
+	- Calls Claude Code (`claude --print`) for all three agent roles.
+	- Collects metrics per day into a `run_YYYYMMDD_HHMMSS_metrics.jsonl` file.
 	- Logs agent output to `logs/day-NNN-role.log`.
+	- Advance order: retailer → manufacturer → provider (important for delivery timing).
 
-- **Skill file** (`skills/manufacturer-manager.md`)
-	- Teaches Claude Code how to play the manufacturer manager role.
+- **Skill files** (`skills/`)
+	- `manufacturer-manager.md` — manufacturer agent
+	- `provider-manager.md` — provider agent (Week 8)
+	- `retail-manager.md` — retailer agent (Week 8)
+
+## Week 8 Status
+
+### Completed
+- [x] All 3 skill files exist and are wired in `config/sim.json`
+- [x] `scenarios/calm-market.json` and `scenarios/holiday-rush.json` created
+- [x] `analysis/plot_results.py` generates 4 charts: `inventory.png`, `prices.png`, `fulfillment.png`, `events.png`
+- [x] `reset_and_seed.py` — resets and re-seeds all 3 DBs from scratch
+- [x] Bug fixed: `fulfillment.png` now shows daily deltas, not cumulative counts
+- [x] Bug fixed: `manufacturer/sales_orders.py` — `release_to_production()` now creates a `ManufacturingOrderRow`, so production actually runs when a sales order is released
+- [x] Bug fixed: `retailer/simulation.py` — `_sync_purchase_orders` now includes `"released"` in the status filter, so it keeps polling the manufacturer until the order is actually delivered (previously stopped polling after seeing "released")
+
+### Pending
+- [ ] Run full 15+ day simulation (holiday-rush) with all bugs fixed and verify fulfilled orders flow correctly
+- [ ] Run calm-market scenario for comparison
+- [ ] Generate final charts from both runs via `analysis/plot_results.py`
+- [ ] Final report (`docs/PRD.md`) — needs simulation results, charts, and interpretation
+- [ ] Presentation slides
+
+## Known Issues / Notes
+- **Advance order matters:** turn engine advances retailer before manufacturer. This means deliveries from manufacturer always arrive 1 day later than the advance that produced them. Expected and normal.
+- **Partial production bug (pre-existing):** `_fulfill_manufacturing_orders` in `manufacturer/simulation.py` marks a `ManufacturingOrder` as "completed" even when it only partially fills it (capacity cap). A 15-unit order with 10/day capacity produces 10 on day 1 and 5 are lost. The second day's 10-unit MO fills the remaining capacity slot. In practice this means sales orders with qty > capacity_per_day may not be fully produced. Worth noting but not blocking for the demo.
+- **DB must be seeded before each run:** run `python reset_and_seed.py` with servers stopped before every fresh simulation.
 
 ## Tech Stack
 
@@ -50,7 +75,7 @@ manufacturer/
 	simulation.py
 	database.py
 	provider_integration.py
-	sales_orders.py          ← Week 7: inbound sales order logic
+	sales_orders.py
 	provider_config.json
 	dashboard.py
 	models.py
@@ -63,13 +88,14 @@ provider/
 	cli.py
 	db.py
 	seed-provider.json
+	seed.py
 	requirements.txt
 	services/
 		catalog.py
 		orders.py
 		simulation.py
 
-retailer/                    ← Week 7: new app
+retailer/
 	main.py
 	cli.py
 	simulation.py
@@ -81,20 +107,29 @@ retailer/                    ← Week 7: new app
 	models.py
 	requirements.txt
 
-turn_engine.py               ← Week 7: orchestration script
+turn_engine.py
+reset_and_seed.py            ← resets + re-seeds all 3 DBs
 config/
-	sim.json                 ← turn engine configuration
+	sim.json
 scenarios/
-	smoke-test.json          ← minimal smoke-test scenario
+	smoke-test.json
+	calm-market.json          ← Week 8: control scenario
+	holiday-rush.json         ← Week 8: volatile scenario (4 events, overlapping)
 skills/
-	manufacturer-manager.md  ← Claude Code skill file
+	manufacturer-manager.md
+	provider-manager.md       ← Week 8
+	retail-manager.md         ← Week 8
+analysis/
+	plot_results.py           ← generates 4 charts from metrics.jsonl
+	output/                   ← generated PNGs (gitignored)
+docs/
+	PRD.md
 logs/                        ← agent output (gitignored)
 
 README.md
 CLAUDE.md
 pyproject.toml
 .gitignore
-.env.example
 ```
 
 ## REST Contracts
@@ -146,14 +181,16 @@ Manufacturer inbound endpoints (Week 7 additions):
 - Created as `outbound_purchase_orders` row
 - Polled each `advance_day`; delivered → stock incremented
 
-### Manufacturer sales order lifecycle (Week 7)
-`pending -> (released) -> shipped -> delivered`
+### Manufacturer sales order lifecycle
+`pending -> released -> delivered`
+(released = agent called `production release`; delivered = stock fulfilled by `advance_sales_orders`)
 
 ### Retailer customer order lifecycle
 `pending -> fulfilled | backordered`
 
 ### Retailer purchase order lifecycle
-`pending -> confirmed -> in_progress -> shipped -> delivered`
+`pending -> released -> delivered`
+(mirrors manufacturer sales order states; "released" must be included in polling filter)
 
 ## Turn Engine
 

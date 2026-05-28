@@ -1,0 +1,7 @@
+Total days simulated: 25
+Total fulfilled orders: 5
+Total backordered orders: 102
+Backorder rate: 95.3%
+Peak manufacturer parts stock: 0 (day 1)
+Lowest retailer stock: 0 (day 1)
+Days with backordered > 0: 25

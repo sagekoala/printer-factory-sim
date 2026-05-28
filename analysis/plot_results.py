@@ -138,8 +138,15 @@ def chart_prices(rows: list[dict], out: Path) -> None:
 
 def chart_fulfillment(rows: list[dict], out: Path) -> None:
     days = [r["day"] for r in rows]
-    fulfilled = [_scalar(_section(r, "retailer"), "orders_fulfilled") for r in rows]
-    backordered = [_scalar(_section(r, "retailer"), "orders_backordered") for r in rows]
+    cum_fulfilled = [_scalar(_section(r, "retailer"), "orders_fulfilled") for r in rows]
+    cum_backordered = [_scalar(_section(r, "retailer"), "orders_backordered") for r in rows]
+
+    # Convert cumulative totals to per-day deltas.
+    def _deltas(series: list[float]) -> list[float]:
+        return [series[0]] + [max(0.0, series[i] - series[i - 1]) for i in range(1, len(series))]
+
+    fulfilled = _deltas(cum_fulfilled)
+    backordered = _deltas(cum_backordered)
 
     width = 0.4
     x = [d - width / 2 for d in days]
@@ -229,13 +236,16 @@ def chart_events(rows: list[dict], scenario: dict, out: Path) -> None:
 
 def write_summary(rows: list[dict], out: Path) -> None:
     days = [r["day"] for r in rows]
-    fulfilled = [_scalar(_section(r, "retailer"), "orders_fulfilled") for r in rows]
-    backordered = [_scalar(_section(r, "retailer"), "orders_backordered") for r in rows]
+    cum_fulfilled = [_scalar(_section(r, "retailer"), "orders_fulfilled") for r in rows]
+    cum_backordered = [_scalar(_section(r, "retailer"), "orders_backordered") for r in rows]
     parts_totals = [_sum_dict(_section(r, "manufacturer"), "parts_stock") for r in rows]
     retail_totals = [_sum_dict(_section(r, "retailer"), "stock") for r in rows]
 
-    total_fulfilled = int(sum(fulfilled))
-    total_backordered = int(sum(backordered))
+    # Cumulative totals at end of run give true total orders placed.
+    total_fulfilled = int(cum_fulfilled[-1]) if cum_fulfilled else 0
+    total_backordered = int(cum_backordered[-1]) if cum_backordered else 0
+    fulfilled = cum_fulfilled
+    backordered = cum_backordered
     total_orders = total_fulfilled + total_backordered
     backorder_rate = (total_backordered / total_orders * 100.0) if total_orders else 0.0
 

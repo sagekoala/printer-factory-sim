@@ -102,6 +102,12 @@ def release_to_production(db: Session, order_id: str, current_day: int) -> tuple
         return False, f"Order is not pending (status: {order.status!r})"
     order.status = "released"
     order.released_day = current_day
+    db.add(ManufacturingOrderRow(
+        id=str(uuid.uuid4()),
+        quantity=order.quantity,
+        status=ManufacturingOrderStatus.pending.value,
+        created_at=datetime.utcnow(),
+    ))
     db.add(EventRow(
         id=str(uuid.uuid4()),
         day=current_day,
