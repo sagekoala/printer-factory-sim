@@ -1,0 +1,37 @@
+{
+  "scenario_name": "demo",
+  "description": "3-day live-demo scenario. Day 1 establishes a normal baseline, day 2 fires a 3x demand spike so the agents react visibly (stockouts, urgent purchase orders, price moves), day 3 returns to normal so the audience can watch recovery.",
+  "base_demand": {"mean": 5, "variance": 2},
+  "events": [
+    {
+      "name": "normal",
+      "start_day": 1,
+      "end_day": 1,
+      "demand_modifier": 1.0,
+      "supply_modifier": 1.0,
+      "lead_time_modifier": 1.0,
+      "price_sensitivity": "normal",
+      "description": "Baseline day — agents establish their default behaviour"
+    },
+    {
+      "name": "demand_spike",
+      "start_day": 2,
+      "end_day": 2,
+      "demand_modifier": 3.0,
+      "supply_modifier": 1.0,
+      "lead_time_modifier": 1.0,
+      "price_sensitivity": "high",
+      "description": "3x demand spike — expect stockouts, expedited POs, and price moves"
+    },
+    {
+      "name": "recovery",
+      "start_day": 3,
+      "end_day": 3,
+      "demand_modifier": 1.0,
+      "supply_modifier": 1.0,
+      "lead_time_modifier": 1.0,
+      "price_sensitivity": "normal",
+      "description": "Back to normal — watch the system catch up and drain backorders"
+    }
+  ]
+}
