@@ -388,8 +388,8 @@ def _retailer_metrics(url: str) -> dict:
         {item["model"]: item["retail_price"] for item in catalog_resp}
         if isinstance(catalog_resp, list) else None
     )
-    orders_fulfilled = len(fulfilled_resp) if isinstance(fulfilled_resp, list) else None
-    orders_backordered = len(backordered_resp) if isinstance(backordered_resp, list) else None
+    orders_fulfilled_total = len(fulfilled_resp) if isinstance(fulfilled_resp, list) else None
+    orders_backordered_total = len(backordered_resp) if isinstance(backordered_resp, list) else None
     stockouts = (
         sum(1 for item in stock_resp if item.get("quantity", 0) == 0)
         if isinstance(stock_resp, list) else None
@@ -398,8 +398,11 @@ def _retailer_metrics(url: str) -> dict:
     return {
         "stock": stock,
         "retail_price": retail_price,
-        "orders_fulfilled": orders_fulfilled,
-        "orders_backordered": orders_backordered,
+        # ``*_total`` makes it explicit that these are cumulative counters
+        # since the start of the run, not per-day deltas. ``plot_results.py``
+        # and ``run_day`` both diff them to recover the daily increment.
+        "orders_fulfilled_total": orders_fulfilled_total,
+        "orders_backordered_total": orders_backordered_total,
         "stockouts": stockouts,
     }
 
@@ -417,6 +420,11 @@ def collect_metrics(day: int, signal: dict, config: dict) -> dict:
         "day": day,
         "scenario_event": scenario_event,
         "demand_modifier": signal.get("demand_modifier", 1.0),
+        # Persist the other two modifiers too — earlier versions only saved
+        # ``demand_modifier`` so charts/reports had no way to attribute a
+        # stockout to a supply event or a long lead-time event.
+        "supply_modifier": signal.get("supply_modifier", 1.0),
+        "lead_time_modifier": signal.get("lead_time_modifier", 1.0),
         "provider": _provider_metrics(provider_url) if provider_url else None,
         "manufacturer": _manufacturer_metrics(manufacturer_url) if manufacturer_url else None,
         "retailer": _retailer_metrics(retailer_url) if retailer_url else None,
@@ -460,6 +468,18 @@ def advance_all(config: dict, lead_time_modifier: float = 1.0) -> None:
         _advance_one(provider["url"], body={"lead_time_modifier": lead_time_modifier})
 
 
+def _abs_cwd(role_path: str) -> str:
+    """Resolve the agent's working directory relative to the repo root.
+
+    Earlier versions passed the raw ``role["path"]`` (e.g. ``"retailer"``)
+    as ``cwd`` to the subprocess. That works only when the turn engine is
+    invoked from the repo root. Resolving against ``_REPO_ROOT`` lets the
+    script be called from anywhere (CI, IDE, an arbitrary user shell).
+    """
+    p = Path(role_path)
+    return str(p if p.is_absolute() else _REPO_ROOT / p)
+
+
 def run_day(day: int, config: dict, scenario: dict, state: RunState) -> None:
     signal = todays_signal(day, scenario)
     print(f"\n{'=' * 60}\n DAY {day}   signal={signal}\n{'=' * 60}")
@@ -469,23 +489,23 @@ def run_day(day: int, config: dict, scenario: dict, state: RunState) -> None:
         orders_placed += generate_customer_orders(retailer["url"], signal)
 
     for retailer in config["retailers"]:
-        run_agent_or_stub("retailer", retailer.get("skill"), signal, retailer["path"])
+        run_agent_or_stub("retailer", retailer.get("skill"), signal, _abs_cwd(retailer["path"]))
     run_agent_or_stub(
         "manufacturer",
         config["manufacturer"].get("skill"),
         signal,
-        config["manufacturer"]["path"],
+        _abs_cwd(config["manufacturer"]["path"]),
     )
     for provider in config["providers"]:
-        run_agent_or_stub("provider", provider.get("skill"), signal, provider["path"])
+        run_agent_or_stub("provider", provider.get("skill"), signal, _abs_cwd(provider["path"]))
 
     metrics = collect_metrics(day, signal, config)
     if state.metrics_path is not None:
         append_metrics(metrics, state.metrics_path)
 
     retailer_m = metrics.get("retailer") or {}
-    cum_fulfilled = int(retailer_m.get("orders_fulfilled") or 0)
-    cum_backordered = int(retailer_m.get("orders_backordered") or 0)
+    cum_fulfilled = int(retailer_m.get("orders_fulfilled_total") or 0)
+    cum_backordered = int(retailer_m.get("orders_backordered_total") or 0)
     daily_fulfilled = cum_fulfilled - state.prev_fulfilled
     daily_backordered = cum_backordered - state.prev_backordered
     state.prev_fulfilled = cum_fulfilled

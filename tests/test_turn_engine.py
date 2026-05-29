@@ -104,6 +104,39 @@ def test_collect_metrics_missing_apps_returns_nulls():
     assert metrics["retailer"] is None
 
 
+def test_collect_metrics_persists_all_three_modifiers():
+    """All three scenario modifiers must land in the JSONL so charts can
+    later attribute stockouts to supply or lead-time events, not only to
+    demand spikes."""
+    signal = {
+        "events": [{"name": "chip_shortage", "start_day": 1, "end_day": 5}],
+        "demand_modifier": 1.5,
+        "supply_modifier": 0.4,
+        "lead_time_modifier": 2.0,
+    }
+    metrics = te.collect_metrics(
+        day=3, signal=signal,
+        config={"providers": [], "manufacturer": {}, "retailers": []},
+    )
+
+    assert metrics["scenario_event"] == "chip_shortage"
+    assert metrics["demand_modifier"] == 1.5
+    assert metrics["supply_modifier"] == 0.4
+    assert metrics["lead_time_modifier"] == 2.0
+
+
+def test_abs_cwd_resolves_relative_role_path_against_repo_root(tmp_path):
+    """The role.path in sim.json is relative; the subprocess must still get
+    an absolute cwd so the turn engine can be invoked from anywhere."""
+    abs_path = te._abs_cwd("retailer")
+    assert Path(abs_path).is_absolute()
+    assert abs_path.endswith("retailer")
+
+    # An absolute path passes through unchanged.
+    already_abs = str(tmp_path)
+    assert te._abs_cwd(already_abs) == already_abs
+
+
 def test_run_state_tracks_per_run_counters():
     state = te.RunState()
     assert state.prev_fulfilled == 0

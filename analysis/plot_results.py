@@ -143,6 +143,20 @@ def _scalar(section: dict, key: str) -> float:
     return float(v) if isinstance(v, (int, float)) else 0.0
 
 
+def _scalar_with_fallback(section: dict, primary_key: str, *fallbacks: str) -> float:
+    """Read the first numeric scalar found in ``primary_key`` then ``*fallbacks``.
+
+    Used to keep old metrics files (with ``orders_fulfilled`` /
+    ``orders_backordered``) compatible after the schema rename to
+    ``orders_fulfilled_total`` / ``orders_backordered_total``.
+    """
+    for key in (primary_key, *fallbacks):
+        v = section.get(key)
+        if isinstance(v, (int, float)):
+            return float(v)
+    return 0.0
+
+
 def _daily_deltas(cumulative: list[float]) -> list[float]:
     """Convert a monotonically-increasing cumulative series to daily diffs."""
     out: list[float] = []
@@ -296,14 +310,20 @@ def chart_prices(rows: list[dict], out: Path, events: list[dict] | None = None) 
 def chart_fulfillment(rows: list[dict], out: Path, events: list[dict] | None = None) -> None:
     """Daily fulfilled vs. backordered grouped bars.
 
-    The retailer exposes ``orders_fulfilled`` / ``orders_backordered`` as
-    cumulative counters, which makes a per-day picture useless when plotted
-    raw (every day looks identical to the last). We diff them to recover the
-    daily increment, which is the metric the audience actually wants to see.
+    The retailer metric exposes ``orders_fulfilled_total`` /
+    ``orders_backordered_total`` as cumulative counters since the start of
+    the run. Plotting them raw produces an uninformative staircase, so we
+    diff them to recover the daily increment.
     """
     days = [r["day"] for r in rows]
-    fulfilled_cum = [_scalar(_section(r, "retailer"), "orders_fulfilled") for r in rows]
-    backordered_cum = [_scalar(_section(r, "retailer"), "orders_backordered") for r in rows]
+    fulfilled_cum = [
+        _scalar_with_fallback(_section(r, "retailer"), "orders_fulfilled_total", "orders_fulfilled")
+        for r in rows
+    ]
+    backordered_cum = [
+        _scalar_with_fallback(_section(r, "retailer"), "orders_backordered_total", "orders_backordered")
+        for r in rows
+    ]
 
     fulfilled = _daily_deltas(fulfilled_cum)
     backordered = _daily_deltas(backordered_cum)
@@ -463,8 +483,14 @@ def chart_events(rows: list[dict], scenario: dict, out: Path) -> None:
 
 def write_summary(rows: list[dict], out: Path) -> None:
     days = [r["day"] for r in rows]
-    fulfilled = [_scalar(_section(r, "retailer"), "orders_fulfilled") for r in rows]
-    backordered = [_scalar(_section(r, "retailer"), "orders_backordered") for r in rows]
+    fulfilled = [
+        _scalar_with_fallback(_section(r, "retailer"), "orders_fulfilled_total", "orders_fulfilled")
+        for r in rows
+    ]
+    backordered = [
+        _scalar_with_fallback(_section(r, "retailer"), "orders_backordered_total", "orders_backordered")
+        for r in rows
+    ]
     parts_totals = [_sum_dict(_section(r, "manufacturer"), "parts_stock") for r in rows]
     retail_totals = [_sum_dict(_section(r, "retailer"), "stock") for r in rows]
 

@@ -119,6 +119,55 @@ def test_advance_day_fulfills_within_capacity_and_consumes_bom(tmp_manufacturer_
     assert part.current_stock == 90  # 100 - 10 * BOM(1)
 
 
+def test_advance_sales_orders_does_not_ship_pending_orders(tmp_manufacturer_db):
+    """Regression for the silent-ship bug.
+
+    A ``pending`` sales order has not been released to production yet, so its
+    MOs were never queued. It must NOT consume incidental finished stock left
+    behind by another order — otherwise the agent learns it can skip the
+    ``release`` step entirely and the pipeline ``pending → released →
+    delivered`` becomes meaningless.
+    """
+    db = tmp_manufacturer_db
+    _seed_basic_factory(db)
+
+    from manufacturer.database import FinishedPrinterStockRow, SalesOrderRow
+    from manufacturer.sales_orders import (
+        advance_sales_orders,
+        create_sales_order,
+        ensure_defaults,
+    )
+
+    ensure_defaults(db)
+    # Create a pending sales order. Then plant 100 finished printers in stock
+    # to simulate inventory built from some unrelated release that happened
+    # earlier. With the bug present, advance_sales_orders would gleefully ship
+    # this pending order. With the fix, the order stays pending.
+    order = create_sales_order(
+        db, retailer_name="Shop", model="Pro 3D Printer", quantity=3, placed_day=0,
+    )
+    stock = (
+        db.query(FinishedPrinterStockRow)
+        .filter(FinishedPrinterStockRow.model == "Pro 3D Printer")
+        .first()
+    )
+    stock.quantity = 100
+    db.commit()
+
+    fulfilled = advance_sales_orders(db, day=1, newly_produced=0)
+
+    assert fulfilled == [], "pending orders must never be shipped — release first"
+    refreshed = db.query(SalesOrderRow).filter(SalesOrderRow.id == order["id"]).first()
+    assert refreshed.status == "pending"
+    # Stock was not touched.
+    stock = (
+        db.query(FinishedPrinterStockRow)
+        .filter(FinishedPrinterStockRow.model == "Pro 3D Printer")
+        .first()
+    )
+    assert stock.quantity == 100
+
+
 def test_advance_day_does_not_double_count_finished_stock(tmp_manufacturer_db):
     """Regression for the double-call bug: even when ``/api/day/advance`` is
     exercised through the FastAPI route, finished stock should equal the

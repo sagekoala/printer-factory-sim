@@ -275,6 +275,86 @@ explícito y propaga `lead_time_modifier` al provider via
 
 ---
 
+## 28. `advance_sales_orders` shipeaba órdenes `pending` (Week 9 follow-up)
+
+**Problema:** El filtro era `status.in_(["pending", "released"])`. Una sales
+order que el agente nunca liberó podía consumir stock terminado dejado por
+otra orden (modelo de pool compartido), lo que rompía el pipeline pedagógico
+`pending → released → delivered` — el agente "aprendía" que el release era
+opcional.
+
+**Solución:** Filtro restringido a `status == "released"`. Una orden que
+nunca se libera se queda `pending` para siempre y aparece en `sales orders`
+como recordatorio visible. Test de regresión:
+`test_advance_sales_orders_does_not_ship_pending_orders`.
+
+---
+
+## 29. `cwd` relativo en `run_agent_or_stub` (Week 9 follow-up)
+
+**Problema:** `turn_engine.run_day` pasaba el `path` del rol literal
+(`"retailer"`, `"manufacturer"`, `"provider"`) como `cwd` al subprocess del
+agente. Funcionaba solo si el turn engine se invocaba desde la raíz del
+repo. Desde CI, IDE o cualquier otra ruta el agente no podía encontrar sus
+DBs ni los CLIs.
+
+**Solución:** Nueva función `_abs_cwd(role_path)` que resuelve cualquier
+path relativo contra `_REPO_ROOT` (definido desde `__file__`). Paths
+absolutos pasan sin tocar. Test:
+`test_abs_cwd_resolves_relative_role_path_against_repo_root`.
+
+---
+
+## 30. JSONL incompleto: `supply_modifier` y `lead_time_modifier` (Week 9 follow-up)
+
+**Problema:** `collect_metrics` solo persistía `demand_modifier` en el JSONL.
+Los otros dos modificadores (`supply_modifier`, `lead_time_modifier`) se
+calculaban en `todays_signal` y se usaban en logs efímeros pero nunca
+llegaban al fichero de métricas. Resultado: los charts y el informe no
+podían atribuir un colapso de stock a un evento de supply o lead-time —
+solo a uno de demand.
+
+**Solución:** Añadidos los tres modificadores al payload de
+`collect_metrics`. Test: `test_collect_metrics_persists_all_three_modifiers`.
+
+**Nota pendiente (no fix en este PR):** El provider sigue ignorando
+`supply_modifier` por completo a la hora de despachar — solo aplica
+`lead_time_modifier`. La opción correcta es propagar `supply_modifier` al
+`POST /api/day/advance` del provider y limitar el número de órdenes shipped
+por día. Queda como issue futuro porque cambia el contrato HTTP y el
+balance de varios escenarios.
+
+---
+
+## 31. Schema rename: `orders_fulfilled_total` / `orders_backordered_total`
+
+**Problema:** El JSONL guardaba `orders_fulfilled` y `orders_backordered`
+como conteos cumulativos desde el inicio del run. El nombre no lo decía,
+así que un lector ocasional asumía que eran diarios. `plot_results.py` y
+`run_day` ya conocían el truco y diffeaban internamente, pero cualquiera
+que leyera el JSONL crudo se confundía.
+
+**Solución:** Renombrados a `orders_fulfilled_total` y
+`orders_backordered_total`. `plot_results.py` lee primero el nuevo nombre y
+cae al viejo si no existe (compatibilidad hacia atrás con runs ya
+generados).
+
+---
+
+## 32. Filtro del retailer incluía estados no usados (cosmético)
+
+**Problema:** `_sync_purchase_orders` filtraba por `["pending", "confirmed",
+"in_progress", "released", "shipped"]`. El manufacturer nunca emite
+`"shipped"` como estado distinto — pasa directo de `released` a
+`delivered` estampando ambos days en la misma transición. Inofensivo pero
+ruidoso al leer.
+
+**Solución:** Filtro limpio a `["pending", "confirmed", "in_progress",
+"released"]` con un comentario explicando el lifecycle real del
+manufacturer.
+
+---
+
 ## Estado final del checklist (week7.pdf Parte 7)
 
 | Item | Estado |

@@ -175,19 +175,27 @@ def get_capacity_info(db: Session) -> dict:
 
 
 def advance_sales_orders(db: Session, day: int, newly_produced: int) -> list[dict]:
-    """Called after advance_day(). Adds new printers to stock, then ships pending sales orders."""
+    """Ship every ``released`` sales order whose model has enough finished stock.
+
+    Only ``released`` orders are eligible — a ``pending`` order has never had
+    its MOs queued via :func:`release_to_production`, so allowing it to ship
+    from incidental stock would let agents skip the release step entirely and
+    silently break the ``pending → released → delivered`` pipeline that the
+    skill files teach. Pending orders stay pending until the agent (or the
+    operator) explicitly releases them.
+    """
     if newly_produced > 0:
         _add_to_finished_stock(db, PRODUCT_NAME, newly_produced, day)
 
-    pending = (
+    released = (
         db.query(SalesOrderRow)
-        .filter(SalesOrderRow.status.in_(["pending", "released"]))
+        .filter(SalesOrderRow.status == "released")
         .order_by(SalesOrderRow.created_at)
         .all()
     )
 
     fulfilled = []
-    for order in pending:
+    for order in released:
         stock = db.query(FinishedPrinterStockRow).filter(
             FinishedPrinterStockRow.model == order.model
         ).first()

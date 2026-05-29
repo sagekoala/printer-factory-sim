@@ -43,10 +43,15 @@ def _increment_day(db: Session) -> int:
 
 
 def _sync_purchase_orders(db: Session, day: int, manufacturer_url: str) -> None:
+    # The manufacturer's sales-order lifecycle is ``pending → released →
+    # delivered`` (it never sets ``shipped`` as a distinct state — ``shipped_day``
+    # and ``delivered_day`` are stamped together in advance_sales_orders).
+    # Anything not yet ``delivered`` is "still active for us", so we poll
+    # every non-terminal status the manufacturer might report.
     active = (
         db.query(PurchaseOrderRow)
         .filter(
-            PurchaseOrderRow.status.in_(["pending", "confirmed", "in_progress", "released", "shipped"]),
+            PurchaseOrderRow.status.in_(["pending", "confirmed", "in_progress", "released"]),
             PurchaseOrderRow.manufacturer_order_id.isnot(None),
         )
         .all()
