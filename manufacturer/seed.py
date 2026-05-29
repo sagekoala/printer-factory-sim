@@ -13,26 +13,15 @@ import json
 from decimal import Decimal
 from pathlib import Path
 
-try:
-    from manufacturer.database import (
-        BOMEntryRow,
-        FactoryConfigRow,
-        ProductRow,
-        SessionLocal,
-        SupplierCatalogRow,
-        SupplierRow,
-        init_db,
-    )
-except ModuleNotFoundError:
-    from database import (
-        BOMEntryRow,
-        FactoryConfigRow,
-        ProductRow,
-        SessionLocal,
-        SupplierCatalogRow,
-        SupplierRow,
-        init_db,
-    )
+from manufacturer.database import (
+    BOMEntryRow,
+    FactoryConfigRow,
+    ProductRow,
+    SessionLocal,
+    SupplierCatalogRow,
+    SupplierRow,
+    init_db,
+)
 
 SEED_FILE = Path(__file__).parent / "seed.json"
 

@@ -157,6 +157,17 @@ async def _on_validation_error(request: Request, exc: RequestValidationError) ->
 
 
 # ---------------------------------------------------------------------------
+# Health
+# ---------------------------------------------------------------------------
+
+
+@app.get("/health", tags=["Health"], summary="Liveness probe.")
+def health() -> dict[str, str]:
+    """Return a static ``{"status": "ok"}`` to confirm the process is up."""
+    return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
 # Catalog & stock
 # ---------------------------------------------------------------------------
 

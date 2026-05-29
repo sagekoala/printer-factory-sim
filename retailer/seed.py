@@ -6,15 +6,19 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-try:
-    from retailer.database import CatalogRow, SimStateRow, StockRow
-except ModuleNotFoundError:
-    from database import CatalogRow, SimStateRow, StockRow
+from retailer.database import CatalogRow, SimStateRow, StockRow
 
 _RETAILER_DIR = Path(__file__).resolve().parent
 
 
 def seed_if_empty(db: Session, config: dict | None = None) -> None:
+    """Seed the retailer DB from ``seed-retailer.json`` on first start.
+
+    ``config`` is accepted for forward-compatibility (some deployments may
+    want a per-retailer seed file later) but is currently unused — every
+    retailer ships the same baseline catalogue.
+    """
+    del config  # reserved for future per-config customisation
     if db.query(CatalogRow).count() > 0:
         return
 

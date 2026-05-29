@@ -6,28 +6,16 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-try:
-    from retailer.database import (
-        CatalogRow,
-        CustomerOrderRow,
-        EventRow,
-        PurchaseOrderRow,
-        SalesHistoryRow,
-        SimStateRow,
-        StockRow,
-    )
-    from retailer.manufacturer_integration import poll_manufacturer_order
-except ModuleNotFoundError:
-    from database import (
-        CatalogRow,
-        CustomerOrderRow,
-        EventRow,
-        PurchaseOrderRow,
-        SalesHistoryRow,
-        SimStateRow,
-        StockRow,
-    )
-    from manufacturer_integration import poll_manufacturer_order
+from retailer.database import (
+    CatalogRow,
+    CustomerOrderRow,
+    EventRow,
+    PurchaseOrderRow,
+    SalesHistoryRow,
+    SimStateRow,
+    StockRow,
+)
+from retailer.manufacturer_integration import poll_manufacturer_order
 
 
 def get_current_day(db: Session) -> int:
@@ -58,7 +46,7 @@ def _sync_purchase_orders(db: Session, day: int, manufacturer_url: str) -> None:
     active = (
         db.query(PurchaseOrderRow)
         .filter(
-            PurchaseOrderRow.status.in_(["pending", "confirmed", "in_progress", "shipped"]),
+            PurchaseOrderRow.status.in_(["pending", "confirmed", "in_progress", "released", "shipped"]),
             PurchaseOrderRow.manufacturer_order_id.isnot(None),
         )
         .all()

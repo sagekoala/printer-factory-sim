@@ -11,26 +11,15 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-try:
-    from manufacturer.database import (
-        EventRow,
-        FactoryConfigRow,
-        FinishedPrinterStockRow,
-        ManufacturingOrderRow,
-        SalesOrderRow,
-        WholesalePriceRow,
-    )
-    from manufacturer.models import ManufacturingOrderStatus
-except ModuleNotFoundError:
-    from database import (
-        EventRow,
-        FactoryConfigRow,
-        FinishedPrinterStockRow,
-        ManufacturingOrderRow,
-        SalesOrderRow,
-        WholesalePriceRow,
-    )
-    from models import ManufacturingOrderStatus
+from manufacturer.database import (
+    EventRow,
+    FactoryConfigRow,
+    FinishedPrinterStockRow,
+    ManufacturingOrderRow,
+    SalesOrderRow,
+    WholesalePriceRow,
+)
+from manufacturer.models import ManufacturingOrderStatus
 
 PRODUCT_NAME = "Pro 3D Printer"
 DEFAULT_WHOLESALE_PRICE = 1000.0
@@ -95,6 +84,30 @@ def get_sales_order(db: Session, order_id: str) -> dict | None:
 
 
 def release_to_production(db: Session, order_id: str, current_day: int) -> tuple[bool, str]:
+    """Move a sales order from ``pending`` to ``released`` and queue production.
+
+    Until Week 7 the simulation generated demand internally via
+    ``_generate_demand`` (commented out at simulation.py:143). When the demand
+    source was switched to retailer-driven sales orders, the conversion step
+    that **creates the actual manufacturing-order rows** was missed — releasing
+    a sales order only flipped its status field, leaving
+    ``manufacturing_orders`` empty so ``_fulfill_manufacturing_orders`` had
+    nothing to build.
+
+    This function now does both halves of the handover:
+
+    1. Mark the sales order ``released`` and stamp ``released_day``.
+    2. Queue ``order.quantity`` single-unit ``ManufacturingOrderRow`` rows in
+       ``pending`` state, mirroring the legacy ``_generate_demand`` shape so
+       ``_fulfill_manufacturing_orders`` picks them up FIFO bounded by
+       ``capacity_per_day``.
+
+    The MOs are intentionally anonymous (no FK back to the sales order) —
+    finished printers go into a shared stock pool and ``advance_sales_orders``
+    ships any sales order that fits the current stock, which keeps the model
+    simple while still being correct when several retailers compete for the
+    same finished inventory.
+    """
     order = db.query(SalesOrderRow).filter(SalesOrderRow.id == order_id).first()
     if order is None:
         return False, f"Sales order {order_id!r} not found"
@@ -102,13 +115,27 @@ def release_to_production(db: Session, order_id: str, current_day: int) -> tuple
         return False, f"Order is not pending (status: {order.status!r})"
     order.status = "released"
     order.released_day = current_day
+
+    # Queue one single-unit MO per ordered printer; daily capacity in
+    # _fulfill_manufacturing_orders enforces the actual throughput cap.
+    for _ in range(order.quantity):
+        db.add(ManufacturingOrderRow(
+            id=str(uuid.uuid4()),
+            quantity=1,
+            status=ManufacturingOrderStatus.pending.value,
+            created_at=datetime.utcnow(),
+        ))
+
     db.add(EventRow(
         id=str(uuid.uuid4()),
         day=current_day,
         event_type="production_released",
         entity_type="sales_order",
         entity_id=order_id,
-        description=f"Day {current_day}: Sales order {order_id} released to production",
+        description=(
+            f"Day {current_day}: Sales order {order_id} released to production "
+            f"({order.quantity} MOs queued)"
+        ),
     ))
     db.commit()
     return True, ""
@@ -128,21 +155,22 @@ def get_production_status(db: Session) -> dict:
 def get_capacity_info(db: Session) -> dict:
     cap_row = db.query(FactoryConfigRow).filter(FactoryConfigRow.key == "capacity_per_day").first()
     day_row = db.query(FactoryConfigRow).filter(FactoryConfigRow.key == "current_day").first()
+    last_built_row = db.query(FactoryConfigRow).filter(FactoryConfigRow.key == "last_day_produced").first()
+    last_built_on_row = db.query(FactoryConfigRow).filter(FactoryConfigRow.key == "last_day_produced_on").first()
+
     capacity = int(cap_row.value) if cap_row else 10
     current_day = int(day_row.value) if day_row else 0
+    last_built = int(last_built_row.value) if last_built_row else 0
+    last_built_on = int(last_built_on_row.value) if last_built_on_row else 0
 
-    today_completed = (
-        db.query(ManufacturingOrderRow)
-        .filter(
-            ManufacturingOrderRow.status == ManufacturingOrderStatus.completed.value,
-            ManufacturingOrderRow.days_elapsed.isnot(None),
-        )
-        .count()
-    )
+    # `utilization_estimate` = printers built on the most recent advance_day().
+    # Stays valid until the next advance, so the gauge keeps showing the
+    # latest production until a new turn replaces it.
     return {
         "capacity_per_day": capacity,
         "current_day": current_day,
-        "utilization_estimate": today_completed,
+        "utilization_estimate": last_built,
+        "utilization_day": last_built_on,
     }
 
 
