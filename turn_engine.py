@@ -499,6 +499,14 @@ def run_day(day: int, config: dict, scenario: dict, state: RunState) -> None:
     for provider in config["providers"]:
         run_agent_or_stub("provider", provider.get("skill"), signal, _abs_cwd(provider["path"]))
 
+    # Advance the simulation BEFORE the snapshot so day-end work
+    # (production, auto-fulfillment of backorders, provider deliveries)
+    # is reflected in the metrics for this day. Snapshotting before
+    # advance_all() consistently lost the most important state changes
+    # of the turn (e.g. printers shipped to retailers and the resulting
+    # backorder→fulfilled transitions).
+    advance_all(config, signal.get("lead_time_modifier", 1.0))
+
     metrics = collect_metrics(day, signal, config)
     if state.metrics_path is not None:
         append_metrics(metrics, state.metrics_path)
@@ -520,8 +528,6 @@ def run_day(day: int, config: dict, scenario: dict, state: RunState) -> None:
         f"{daily_backordered} backordered / "
         f"{stockouts} stockout(s) ---"
     )
-
-    advance_all(config, signal.get("lead_time_modifier", 1.0))
 
 
 # ---------------------------------------------------------------------------
