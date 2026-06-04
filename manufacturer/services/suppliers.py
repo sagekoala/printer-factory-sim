@@ -31,20 +31,12 @@ from typing import Optional
 import httpx
 from sqlalchemy.orm import Session
 
-try:
-    from manufacturer.database import (
-        EventRow,
-        FactoryConfigRow,
-        OutboundPurchaseOrderRow,
-        ProductRow,
-    )
-except ModuleNotFoundError:
-    from database import (  # type: ignore[no-redef]
-        EventRow,
-        FactoryConfigRow,
-        OutboundPurchaseOrderRow,
-        ProductRow,
-    )
+from manufacturer.database import (
+    EventRow,
+    FactoryConfigRow,
+    OutboundPurchaseOrderRow,
+    ProductRow,
+)
 
 
 _log = logging.getLogger(__name__)
@@ -56,8 +48,7 @@ _log = logging.getLogger(__name__)
 REQUEST_TIMEOUT_SECONDS: float = 8.0
 
 _MANUFACTURER_DIR = Path(__file__).resolve().parent.parent
-_CONFIG_NEW = _MANUFACTURER_DIR / "config.json"
-_CONFIG_LEGACY = _MANUFACTURER_DIR / "provider_config.json"
+_CONFIG_PATH = _MANUFACTURER_DIR / "config.json"
 
 
 class ProviderError(Exception):
@@ -89,23 +80,14 @@ class ProviderHTTPError(ProviderError):
 def list_providers() -> list[dict[str, str]]:
     """Return ``[{name, url}, ...]`` for every configured provider.
 
-    Resolution order:
-
-    1. ``manufacturer/config.json`` (new spec, flat structure).
-    2. ``manufacturer/provider_config.json`` (Week 5 legacy with
-       ``manufacturer.providers`` nesting).
-
-    Returns ``[]`` if neither file exists.  Always returns a fresh
-    list — callers can mutate the result safely.
+    Reads ``manufacturer/config.json``. Returns an empty list when the file
+    is absent. Always returns a fresh list so callers can mutate the result
+    safely.
     """
-    if _CONFIG_NEW.exists():
-        payload = json.loads(_CONFIG_NEW.read_text())
-        providers = payload.get("providers", [])
-    elif _CONFIG_LEGACY.exists():
-        payload = json.loads(_CONFIG_LEGACY.read_text())
-        providers = payload.get("manufacturer", {}).get("providers", [])
-    else:
+    if not _CONFIG_PATH.exists():
         return []
+    payload = json.loads(_CONFIG_PATH.read_text())
+    providers = payload.get("providers", [])
     return [{"name": p["name"], "url": p["url"].rstrip("/")} for p in providers]
 
 

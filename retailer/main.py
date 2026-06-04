@@ -11,39 +11,23 @@ from typing import Optional
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-try:
-    from retailer.database import (
-        CatalogRow,
-        CustomerOrderRow,
-        EventRow,
-        PurchaseOrderRow,
-        SessionLocal,
-        SimStateRow,
-        StockRow,
-        get_db,
-        init_db,
-    )
-    from retailer.manufacturer_integration import place_manufacturer_order
-    from retailer.seed import seed_if_empty
-    from retailer import simulation
-except ModuleNotFoundError:
-    from database import (
-        CatalogRow,
-        CustomerOrderRow,
-        EventRow,
-        PurchaseOrderRow,
-        SessionLocal,
-        SimStateRow,
-        StockRow,
-        get_db,
-        init_db,
-    )
-    from manufacturer_integration import place_manufacturer_order
-    from seed import seed_if_empty
-    import simulation
+from retailer import simulation
+from retailer.database import (
+    CatalogRow,
+    CustomerOrderRow,
+    EventRow,
+    PurchaseOrderRow,
+    SessionLocal,
+    SimStateRow,
+    StockRow,
+    get_db,
+    init_db,
+)
+from retailer.manufacturer_integration import place_manufacturer_order
+from retailer.seed import seed_if_empty
 
 _RETAILER_DIR = Path(__file__).resolve().parent
 _config: dict = {}
@@ -77,18 +61,18 @@ app = FastAPI(
 
 
 class CreateCustomerOrderRequest(BaseModel):
-    customer: str
-    model: str
-    quantity: int = 1
+    customer: str = Field(..., min_length=1)
+    model: str = Field(..., min_length=1)
+    quantity: int = Field(default=1, gt=0)
 
 
 class CreatePurchaseRequest(BaseModel):
-    model: str
-    quantity: int
+    model: str = Field(..., min_length=1)
+    quantity: int = Field(..., gt=0)
 
 
 class SetPriceRequest(BaseModel):
-    price: float
+    price: float = Field(..., ge=0)
 
 
 # ---------------------------------------------------------------------------
@@ -293,8 +277,17 @@ def list_purchase_orders(
     return [_po_to_dict(r) for r in rows]
 
 
-@app.post("/api/price")
-def set_price(payload: SetPriceRequest, model: str = Query(...), db: Session = Depends(get_db)) -> dict:
+@app.post("/api/prices/{model}")
+def set_price(
+    model: str,
+    payload: SetPriceRequest,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Update the retail price for ``model``.
+
+    Mirrors the shape of the manufacturer's ``POST /api/prices/{model}``
+    so both apps share one pricing-update convention.
+    """
     row = db.query(CatalogRow).filter(CatalogRow.model == model).first()
     if row is None:
         raise HTTPException(status_code=404, detail=f"Model {model!r} not in catalog")

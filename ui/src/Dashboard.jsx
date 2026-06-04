@@ -679,41 +679,31 @@ function MainGrid({ data }) {
     (o) => !["delivered", "cancelled"].includes(o.status),
   ).length;
 
-  // Manufacturer parts (richer than finished printers).
+  // Manufacturer parts.
+  // Note: `storage_size` from the manufacturer API is the warehouse footprint
+  // PER UNIT (e.g. 1 Frame = 2 slots), NOT a stock cap. There is no real
+  // per-part capacity, so we omit the `/N` suffix entirely. Color is driven
+  // by the `deficit` field already provided by the backend.
   const mfgInventory = data.manufacturer.inventory.slice(0, 6).map((p) => ({
     name: p.name,
     quantity: p.current_stock,
-    capacity: p.storage_size > 0 ? p.storage_size : null,
     deficit: p.deficit > 0 ? p.deficit : 0,
   }));
-  const mfgFinished = data.manufacturer.stock.slice(0, 3).map((s) => ({
+  // Finished printers — no real cap; let the bar auto-scale (no `/N` suffix).
+  const mfgFinishedWithCap = data.manufacturer.stock.slice(0, 3).map((s) => ({
     name: s.model ?? s.name ?? "?",
     quantity: s.quantity ?? 0,
-  }));
-  const mfgFinishedBaseline = Math.max(
-    5,
-    ...data.manufacturer.stock.map((s) => s.quantity ?? 0),
-  );
-  const mfgFinishedWithCap = mfgFinished.map((it) => ({
-    ...it,
-    capacity: mfgFinishedBaseline,
   }));
   const mfgPending = data.manufacturer.orders.filter(
     (o) => !["delivered", "cancelled"].includes(o.status),
   ).length;
 
-  // Retailer
-  const retailerStock = data.retailer.stock.slice(0, 4).map((s) => ({
+  // Retailer — no real capacity exists, so leave `capacity` undefined and
+  // let StockBars render the bar against `Math.max(quantity, 10)` internally
+  // (no misleading "/ 5" suffix in the label).
+  const retailerStockWithCap = data.retailer.stock.slice(0, 4).map((s) => ({
     name: s.model ?? s.name ?? "?",
     quantity: s.quantity ?? 0,
-  }));
-  const retailerStockBaseline = Math.max(
-    5,
-    ...data.retailer.stock.map((s) => s.quantity ?? 0),
-  );
-  const retailerStockWithCap = retailerStock.map((it) => ({
-    ...it,
-    capacity: retailerStockBaseline,
   }));
   const retailerBackorders = data.retailer.backorders?.length ?? 0;
   const retailerPending = data.retailer.orders.filter(
@@ -1084,6 +1074,8 @@ function EventFeed({ data }) {
  * ==========================================================================*/
 function AutoRefreshBar({ intervalMs, setIntervalMs, lastUpdated, onRefresh, loading }) {
   const options = [
+    { id: 2000,  label: "2s"  },
+    { id: 5000,  label: "5s"  },
     { id: 10000, label: "10s" },
     { id: 30000, label: "30s" },
     { id: null,  label: "Off" },
@@ -1140,7 +1132,9 @@ function AutoRefreshBar({ intervalMs, setIntervalMs, lastUpdated, onRefresh, loa
  * ==========================================================================*/
 export default function Dashboard() {
   const [data, refetch] = useDashboardData();
-  const [intervalMs, setIntervalMs] = useState(10000);
+  // Default to 2s: snappy enough for live demos where a stub day takes <1s.
+  // The 5 parallel fetches per cycle take ~50–200ms total, so 2s is safe.
+  const [intervalMs, setIntervalMs] = useState(2000);
   const intervalRef = useRef(null);
 
   // initial mount
@@ -1171,7 +1165,7 @@ export default function Dashboard() {
         refetch();
       } else if (e.key === " ") {
         e.preventDefault();
-        setIntervalMs((curr) => (curr === null ? 10000 : null));
+        setIntervalMs((curr) => (curr === null ? 2000 : null));
       }
     };
     window.addEventListener("keydown", onKey);

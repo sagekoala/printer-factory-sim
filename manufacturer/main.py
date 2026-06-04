@@ -1,18 +1,17 @@
 """REST API entry point for the 3D Printer Production Simulator.
 
-This module wires FastAPI routes to the simulation and database layers.
-All business logic lives in ``simulation.py``; all persistence lives in
-``database.py``.  This file is intentionally thin: routes validate input,
-call a service function, and serialise the result.
+Routes are intentionally thin: they validate the incoming Pydantic payload,
+delegate to a service in :mod:`manufacturer.simulation`,
+:mod:`manufacturer.sales_orders`, or :mod:`manufacturer.services.suppliers`,
+and serialise the result. No business logic lives in this module.
 
-Start the server
-----------------
-    uvicorn manufacturer.main:app --reload
+Start the server::
 
-Interactive docs
-----------------
-    http://localhost:8000/docs    (Swagger UI)
-    http://localhost:8000/redoc   (ReDoc)
+    uvicorn manufacturer.main:app --reload --port 8002
+
+Interactive docs::
+
+    http://localhost:8002/docs
 """
 
 from __future__ import annotations
@@ -23,59 +22,45 @@ from decimal import Decimal
 from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-try:
-    from manufacturer.database import (
-        BOMEntryRow,
-        FactoryConfigRow,
-        ManufacturingOrderRow,
-        OutboundPurchaseOrderRow,
-        ProductRow,
-        PurchaseOrderRow,
-        get_db,
-        init_db,
-    )
-    from manufacturer.models import (
-        ManufacturingOrder,
-        ManufacturingOrderStatus,
-        Product,
-        PurchaseOrder,
-        PurchaseOrderStatus,
-    )
-    from manufacturer.provider_integration import (
-        create_outbound_purchase,
-        fetch_supplier_catalog,
-        list_configured_suppliers,
-        list_outbound_purchase_orders,
-    )
-    from manufacturer.simulation import advance_day
-except ModuleNotFoundError:
-    from database import (
-        BOMEntryRow,
-        FactoryConfigRow,
-        ManufacturingOrderRow,
-        OutboundPurchaseOrderRow,
-        ProductRow,
-        PurchaseOrderRow,
-        get_db,
-        init_db,
-    )
-    from models import (
-        ManufacturingOrder,
-        ManufacturingOrderStatus,
-        Product,
-        PurchaseOrder,
-        PurchaseOrderStatus,
-    )
-    from provider_integration import (
-        create_outbound_purchase,
-        fetch_supplier_catalog,
-        list_configured_suppliers,
-        list_outbound_purchase_orders,
-    )
-    from simulation import advance_day
-from pydantic import BaseModel
+from manufacturer.database import (
+    BOMEntryRow,
+    FactoryConfigRow,
+    ManufacturingOrderRow,
+    OutboundPurchaseOrderRow,
+    ProductRow,
+    PurchaseOrderRow,
+    get_db,
+    init_db,
+)
+from manufacturer.models import (
+    ManufacturingOrder,
+    ManufacturingOrderStatus,
+    PurchaseOrder,
+    PurchaseOrderStatus,
+)
+from manufacturer.sales_orders import (
+    create_sales_order,
+    ensure_defaults,
+    get_capacity_info,
+    get_finished_stock,
+    get_production_status,
+    get_sales_order,
+    get_wholesale_prices,
+    list_sales_orders,
+    set_wholesale_price,
+)
+from manufacturer.services.suppliers import (
+    ProviderHTTPError,
+    ProviderUnreachableError,
+    get_catalog as fetch_provider_catalog,
+    list_providers,
+    list_purchase_orders as list_outbound_purchase_orders,
+    place_order as place_outbound_order,
+)
+from manufacturer.simulation import advance_day
 
 
 # ---------------------------------------------------------------------------
@@ -90,38 +75,29 @@ async def lifespan(app: FastAPI):
     yield
 
 
-# ---------------------------------------------------------------------------
-# App
-# ---------------------------------------------------------------------------
-
-
 app = FastAPI(
     title="3D Printer Production Simulator",
     description=(
         "REST API for managing and observing a discrete-event simulation of a "
-        "3D printer factory.  Use the `/simulation/advance` endpoint to step "
-        "through time, and the inventory / order endpoints to inspect state."
+        "3D printer factory. Step time with ``POST /api/day/advance`` and "
+        "inspect state through the inventory / orders / sales endpoints."
     ),
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
 
 # ---------------------------------------------------------------------------
-# Response-only models (not in models.py because they are API-layer concerns)
+# Request / Response models (API-layer only)
 # ---------------------------------------------------------------------------
 
 
 class FactoryStatus(BaseModel):
-    """Summary of the factory's current operational state."""
-
     current_day: int
     total_completed_printers: int
 
 
 class AdvanceDayResponse(BaseModel):
-    """Returned after successfully advancing the simulation by one day."""
-
     previous_day: int
     current_day: int
 
@@ -129,12 +105,9 @@ class AdvanceDayResponse(BaseModel):
 class InventoryItem(BaseModel):
     """Per-part inventory snapshot with derived planning fields.
 
-    - **committed**: units reserved by pending manufacturing orders (not yet
-      consumed from stock).
-    - **in_transit**: units on open (pending/shipped) purchase orders not yet
-      delivered to the warehouse.
-    - **deficit**: units short relative to committed demand
-      (``max(0, committed - current_stock)``).
+    - **committed**: units reserved by pending manufacturing orders.
+    - **in_transit**: units on open (pending/shipped) purchase orders.
+    - **deficit**: ``max(0, committed − current_stock)``.
     """
 
     id: uuid.UUID
@@ -152,9 +125,9 @@ class ConfiguredSupplier(BaseModel):
 
 
 class CreateOutboundPurchaseRequest(BaseModel):
-    supplier_name: str
-    product_id: str
-    quantity: int
+    supplier_name: str = Field(..., min_length=1)
+    product_id: str = Field(..., min_length=1)
+    quantity: int = Field(..., gt=0)
 
 
 class OutboundPurchaseOrderResponse(BaseModel):
@@ -166,10 +139,40 @@ class OutboundPurchaseOrderResponse(BaseModel):
     placed_day: int
     expected_delivery_day: int
     status: str
+    unit_price: float | None = None
+    total_price: float | None = None
+    delivered_day: int | None = None
+
+
+class CreateSalesOrderRequest(BaseModel):
+    retailer_name: str = Field(..., min_length=1)
+    model: str = Field(..., min_length=1)
+    quantity: int = Field(..., gt=0)
+
+
+class SetWholesalePriceRequest(BaseModel):
+    price: float = Field(..., ge=0)
 
 
 # ---------------------------------------------------------------------------
-# ORM-row → Pydantic mappers
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _current_day(db: Session) -> int:
+    row = db.query(FactoryConfigRow).filter(FactoryConfigRow.key == "current_day").first()
+    return int(row.value) if row else 0
+
+
+def _provider_url_or_404(name: str) -> str:
+    for entry in list_providers():
+        if entry["name"] == name:
+            return entry["url"]
+    raise HTTPException(status_code=404, detail=f"Unknown supplier: {name!r}")
+
+
+# ---------------------------------------------------------------------------
+# ORM → Pydantic mappers
 # ---------------------------------------------------------------------------
 
 
@@ -178,12 +181,6 @@ def _build_inventory_item(
     committed_by_part: dict[str, int],
     in_transit_by_part: dict[str, int],
 ) -> InventoryItem:
-    """Build an :class:`InventoryItem` from a product row and pre-computed dicts.
-
-    ``committed_by_part`` maps part ID → units required by pending MOs.
-    ``in_transit_by_part`` maps part ID → units on open (pending/shipped) POs.
-    ``deficit`` is the shortfall of on-hand stock against committed demand.
-    """
     committed = committed_by_part.get(row.id, 0)
     in_transit = in_transit_by_part.get(row.id, 0)
     deficit = max(0, committed - row.current_stock)
@@ -199,11 +196,6 @@ def _build_inventory_item(
 
 
 def _map_manufacturing_order(row: ManufacturingOrderRow) -> ManufacturingOrder:
-    """Convert a :class:`~database.ManufacturingOrderRow` to a :class:`~models.ManufacturingOrder`.
-
-    The ``status`` string is coerced to the :class:`~models.ManufacturingOrderStatus`
-    enum so FastAPI can serialise it consistently.
-    """
     return ManufacturingOrder(
         id=uuid.UUID(row.id),
         quantity=row.quantity,
@@ -216,12 +208,6 @@ def _map_manufacturing_order(row: ManufacturingOrderRow) -> ManufacturingOrder:
 
 
 def _map_purchase_order(row: PurchaseOrderRow) -> PurchaseOrder:
-    """Convert a :class:`~database.PurchaseOrderRow` to a :class:`~models.PurchaseOrder`.
-
-    ``unit_price`` is stored as ``Numeric(10, 2)`` in SQLite and returned as a
-    string by some drivers; wrapping it in ``Decimal(str(...))`` normalises this
-    before Pydantic validates the field.
-    """
     active_statuses = {PurchaseOrderStatus.pending.value, PurchaseOrderStatus.shipped.value}
     days_to_arrival = row.lead_time_remaining if row.status in active_statuses else None
     return PurchaseOrder(
@@ -246,45 +232,23 @@ def _map_purchase_order(row: PurchaseOrderRow) -> PurchaseOrder:
 
 @app.get("/health", tags=["Health"])
 def health() -> dict[str, str]:
-    """Return a simple liveness check.
-
-    Use this to verify the API process is running before making other calls.
-    """
+    """Simple liveness probe."""
     return {"status": "ok"}
 
 
 # ---------------------------------------------------------------------------
-# Inventory endpoints
+# Inventory
 # ---------------------------------------------------------------------------
 
 
-@app.get(
-    "/inventory",
-    response_model=list[InventoryItem],
-    tags=["Inventory"],
-)
+@app.get("/inventory", response_model=list[InventoryItem], tags=["Inventory"])
 def get_inventory(db: Session = Depends(get_db)) -> list[InventoryItem]:
-    """Return all parts with on-hand stock and derived planning fields.
-
-    Each entry includes:
-
-    - **current_stock**: units physically in the warehouse right now.
-    - **committed**: units required by *pending* manufacturing orders (BOM
-      quantity × order quantity, summed across all pending MOs).
-    - **in_transit**: units on open purchase orders (``pending`` or
-      ``shipped``) not yet delivered.
-    - **deficit**: units short of committed demand (``max(0, committed −
-      current_stock)``).
-
-    Results are sorted alphabetically by part name.
-    """
+    """Return parts with on-hand stock and derived planning fields."""
     rows = db.query(ProductRow).order_by(ProductRow.name).all()
 
-    # BOM lookup: part_id → units required per printer
     bom_entries = db.query(BOMEntryRow).all()
-    bom_by_part: dict[str, int] = {e.part_id: e.quantity_per_unit for e in bom_entries}
+    bom_by_part = {e.part_id: e.quantity_per_unit for e in bom_entries}
 
-    # Committed: sum BOM requirements across all pending MOs
     pending_mos = (
         db.query(ManufacturingOrderRow)
         .filter(ManufacturingOrderRow.status == ManufacturingOrderStatus.pending.value)
@@ -297,7 +261,6 @@ def get_inventory(db: Session = Depends(get_db)) -> list[InventoryItem]:
                 committed_by_part.get(part_id, 0) + qty_per_unit * mo.quantity
             )
 
-    # In-transit: sum quantities on open POs not yet delivered
     active_pos = (
         db.query(PurchaseOrderRow)
         .filter(
@@ -317,30 +280,15 @@ def get_inventory(db: Session = Depends(get_db)) -> list[InventoryItem]:
 
 
 # ---------------------------------------------------------------------------
-# Order endpoints
+# Orders (legacy Week 5 internal orders)
 # ---------------------------------------------------------------------------
 
 
-@app.get(
-    "/orders/manufacturing",
-    response_model=list[ManufacturingOrder],
-    tags=["Orders"],
-)
+@app.get("/orders/manufacturing", response_model=list[ManufacturingOrder], tags=["Orders"])
 def get_manufacturing_orders(
-    status: Optional[ManufacturingOrderStatus] = Query(
-        default=None,
-        description="Filter by order status. Omit to return all orders.",
-    ),
+    status: Optional[ManufacturingOrderStatus] = Query(default=None),
     db: Session = Depends(get_db),
 ) -> list[ManufacturingOrder]:
-    """Return manufacturing orders, optionally filtered by status.
-
-    **Status values:** `pending` | `in_progress` | `completed` | `cancelled`
-
-    Orders are returned oldest-first so the queue priority is immediately
-    visible.  Omit the `status` parameter to retrieve all orders regardless
-    of their state.
-    """
     query = db.query(ManufacturingOrderRow)
     if status is not None:
         query = query.filter(ManufacturingOrderRow.status == status.value)
@@ -348,26 +296,11 @@ def get_manufacturing_orders(
     return [_map_manufacturing_order(r) for r in rows]
 
 
-@app.get(
-    "/orders/purchase",
-    response_model=list[PurchaseOrder],
-    tags=["Orders"],
-)
+@app.get("/orders/purchase", response_model=list[PurchaseOrder], tags=["Orders"])
 def get_purchase_orders(
-    status: Optional[PurchaseOrderStatus] = Query(
-        default=None,
-        description="Filter by order status. Omit to return all orders.",
-    ),
+    status: Optional[PurchaseOrderStatus] = Query(default=None),
     db: Session = Depends(get_db),
 ) -> list[PurchaseOrder]:
-    """Return purchase orders placed with suppliers, optionally filtered by status.
-
-    **Status values:** `pending` | `shipped` | `delivered` | `cancelled`
-
-    Each purchase order includes the locked-in unit price, the supplier and
-    part IDs, and the remaining lead-time days until the next simulated
-    delivery.  Omit `status` to return all orders.
-    """
     query = db.query(PurchaseOrderRow)
     if status is not None:
         query = query.filter(PurchaseOrderRow.status == status.value)
@@ -376,90 +309,47 @@ def get_purchase_orders(
 
 
 # ---------------------------------------------------------------------------
-# Factory status endpoint
+# Factory status
 # ---------------------------------------------------------------------------
 
 
-@app.get(
-    "/factory/status",
-    response_model=FactoryStatus,
-    tags=["Factory"],
-)
+@app.get("/factory/status", response_model=FactoryStatus, tags=["Factory"])
 def get_factory_status(db: Session = Depends(get_db)) -> FactoryStatus:
-    """Return a high-level snapshot of the factory's current state.
-
-    - **current_day**: The simulation day that was last fully processed.
-      Day 0 means the simulation has not been started yet.
-    - **total_completed_printers**: Cumulative count of manufacturing orders
-      that have reached `completed` status since the simulation began.
-    """
-    day_row = db.query(FactoryConfigRow).filter(FactoryConfigRow.key == "current_day").first()
-    current_day = int(day_row.value) if day_row else 0
-
+    current_day = _current_day(db)
     completed = (
         db.query(ManufacturingOrderRow)
         .filter(ManufacturingOrderRow.status == ManufacturingOrderStatus.completed.value)
         .count()
     )
-
     return FactoryStatus(current_day=current_day, total_completed_printers=completed)
 
 
-# ---------------------------------------------------------------------------
-# Simulation control endpoint
-# ---------------------------------------------------------------------------
-
-
-@app.post(
-    "/simulation/advance",
-    response_model=AdvanceDayResponse,
-    tags=["Simulation"],
-)
+@app.post("/simulation/advance", response_model=AdvanceDayResponse, tags=["Simulation"])
 def simulation_advance(db: Session = Depends(get_db)) -> AdvanceDayResponse:
-    """Advance the simulation by one day and return the updated day numbers.
-
-    Each call triggers the full daily simulation cycle:
-
-    1. **Day increment** — the factory clock moves forward by one day.
-    2. **PO delivery** — purchase orders whose lead time has elapsed are
-       delivered and stock levels are updated.
-    3. **Demand generation** — between 5 and 15 new manufacturing orders are
-       created to represent incoming customer demand.
-    4. **Order fulfilment** — pending manufacturing orders are fulfilled in
-       FIFO order up to the factory's daily production capacity (10 printers),
-       consuming BOM components from inventory.
-
-    All changes are persisted to the SQLite database before this endpoint
-    returns.
-    """
-    day_row = db.query(FactoryConfigRow).filter(FactoryConfigRow.key == "current_day").first()
-    previous_day = int(day_row.value) if day_row else 0
-
+    """Advance the simulation by one day (Week 5 endpoint)."""
+    previous_day = _current_day(db)
     new_day = advance_day(db)
-
     return AdvanceDayResponse(previous_day=previous_day, current_day=new_day)
 
 
-@app.get(
-    "/api/suppliers",
-    response_model=list[ConfiguredSupplier],
-    tags=["Provider Integration"],
-)
+# ---------------------------------------------------------------------------
+# Provider integration (outbound purchases)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/suppliers", response_model=list[ConfiguredSupplier], tags=["Provider Integration"])
 def api_list_suppliers() -> list[ConfiguredSupplier]:
-    suppliers = list_configured_suppliers()
-    return [ConfiguredSupplier(**row) for row in suppliers]
+    return [ConfiguredSupplier(**row) for row in list_providers()]
 
 
-@app.get(
-    "/api/suppliers/{name}/catalog",
-    tags=["Provider Integration"],
-)
+@app.get("/api/suppliers/{name}/catalog", tags=["Provider Integration"])
 def api_supplier_catalog(name: str) -> list[dict]:
+    url = _provider_url_or_404(name)
     try:
-        return fetch_supplier_catalog(name)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except RuntimeError as exc:
+        return fetch_provider_catalog(url)
+    except ProviderHTTPError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except ProviderUnreachableError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
@@ -472,18 +362,27 @@ def api_create_outbound_purchase(
     payload: CreateOutboundPurchaseRequest,
     db: Session = Depends(get_db),
 ) -> OutboundPurchaseOrderResponse:
+    url = _provider_url_or_404(payload.supplier_name)
     try:
-        row = create_outbound_purchase(
+        row = place_outbound_order(
             db,
+            provider_url=url,
             supplier_name=payload.supplier_name,
             product_id=payload.product_id,
             quantity=payload.quantity,
+            current_day=_current_day(db),
         )
-        return OutboundPurchaseOrderResponse(**row)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except RuntimeError as exc:
+    except ProviderHTTPError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    except ProviderUnreachableError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    # Translate the services.suppliers ``supplier_name`` field back to
+    # ``provider_name`` to preserve the public API contract.
+    row["provider_name"] = row.pop("supplier_name")
+    return OutboundPurchaseOrderResponse(**row)
 
 
 @app.get(
@@ -492,54 +391,16 @@ def api_create_outbound_purchase(
     tags=["Provider Integration"],
 )
 def api_list_outbound_purchases(db: Session = Depends(get_db)) -> list[OutboundPurchaseOrderResponse]:
-    rows = list_outbound_purchase_orders(db)
+    rows: list[dict] = []
+    for row in list_outbound_purchase_orders(db):
+        row["provider_name"] = row.pop("supplier_name")
+        rows.append(row)
     return [OutboundPurchaseOrderResponse(**row) for row in rows]
 
 
 # ---------------------------------------------------------------------------
-# Week 7 additions — sales orders, finished stock, wholesale prices, turn-engine
+# Sales (inbound from retailers — Week 7 additions)
 # ---------------------------------------------------------------------------
-
-try:
-    from manufacturer.database import FinishedPrinterStockRow, SalesOrderRow, WholesalePriceRow
-    from manufacturer.sales_orders import (
-        advance_sales_orders,
-        create_sales_order,
-        ensure_defaults,
-        get_capacity_info,
-        get_finished_stock,
-        get_production_status,
-        get_sales_order as _get_sales_order,
-        get_wholesale_prices,
-        list_sales_orders,
-        release_to_production as _release_to_production,
-        set_wholesale_price as _set_wholesale_price,
-    )
-except ModuleNotFoundError:
-    from database import FinishedPrinterStockRow, SalesOrderRow, WholesalePriceRow  # type: ignore
-    from sales_orders import (  # type: ignore
-        advance_sales_orders,
-        create_sales_order,
-        ensure_defaults,
-        get_capacity_info,
-        get_finished_stock,
-        get_production_status,
-        get_sales_order as _get_sales_order,
-        get_wholesale_prices,
-        list_sales_orders,
-        release_to_production as _release_to_production,
-        set_wholesale_price as _set_wholesale_price,
-    )
-
-
-class CreateSalesOrderRequest(BaseModel):
-    retailer_name: str
-    model: str
-    quantity: int
-
-
-class SetWholesalePriceRequest(BaseModel):
-    price: float
 
 
 @app.get("/api/catalog", tags=["Sales"])
@@ -560,15 +421,13 @@ def api_create_sales_order(
     db: Session = Depends(get_db),
 ) -> dict:
     ensure_defaults(db)
-    day_row = db.query(FactoryConfigRow).filter(FactoryConfigRow.key == "current_day").first()
-    current_day = int(day_row.value) if day_row else 0
     try:
         return create_sales_order(
             db,
             retailer_name=payload.retailer_name,
             model=payload.model,
             quantity=payload.quantity,
-            placed_day=current_day,
+            placed_day=_current_day(db),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -584,42 +443,10 @@ def api_list_sales_orders(
 
 @app.get("/api/orders/{order_id}", tags=["Sales"])
 def api_get_sales_order(order_id: str, db: Session = Depends(get_db)) -> dict:
-    order = _get_sales_order(db, order_id)
+    order = get_sales_order(db, order_id)
     if order is None:
         raise HTTPException(status_code=404, detail=f"Sales order {order_id!r} not found")
     return order
-
-
-@app.post("/api/day/advance", tags=["Turn Engine"])
-def api_day_advance(db: Session = Depends(get_db)) -> dict:
-    ensure_defaults(db)
-    day_row = db.query(FactoryConfigRow).filter(FactoryConfigRow.key == "current_day").first()
-    previous_day = int(day_row.value) if day_row else 0
-
-    before_count = (
-        db.query(ManufacturingOrderRow)
-        .filter(ManufacturingOrderRow.status == ManufacturingOrderStatus.completed.value)
-        .count()
-    )
-
-    new_day = advance_day(db)
-
-    after_count = (
-        db.query(ManufacturingOrderRow)
-        .filter(ManufacturingOrderRow.status == ManufacturingOrderStatus.completed.value)
-        .count()
-    )
-
-    newly_produced = max(0, after_count - before_count)
-    advance_sales_orders(db, new_day, newly_produced)
-
-    return {"previous_day": previous_day, "current_day": new_day}
-
-
-@app.get("/api/day/current", tags=["Turn Engine"])
-def api_day_current(db: Session = Depends(get_db)) -> dict:
-    day_row = db.query(FactoryConfigRow).filter(FactoryConfigRow.key == "current_day").first()
-    return {"current_day": int(day_row.value) if day_row else 0}
 
 
 @app.get("/api/capacity", tags=["Sales"])
@@ -639,11 +466,34 @@ def api_set_price(
     payload: SetWholesalePriceRequest,
     db: Session = Depends(get_db),
 ) -> dict:
-    day_row = db.query(FactoryConfigRow).filter(FactoryConfigRow.key == "current_day").first()
-    current_day = int(day_row.value) if day_row else 0
-    return _set_wholesale_price(db, model, payload.price, current_day)
+    return set_wholesale_price(db, model, payload.price, _current_day(db))
 
 
 @app.get("/api/production/status", tags=["Sales"])
 def api_production_status(db: Session = Depends(get_db)) -> dict:
     return get_production_status(db)
+
+
+# ---------------------------------------------------------------------------
+# Turn-engine endpoints
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/day/advance", tags=["Turn Engine"])
+def api_day_advance(db: Session = Depends(get_db)) -> dict:
+    """Advance the manufacturer simulation by one day.
+
+    ``simulation.advance_day`` already runs ``advance_sales_orders`` with the
+    correct ``printers_built`` count, so this endpoint only seeds defaults
+    and returns the new day. Calling ``advance_sales_orders`` again would
+    double-count today's production into finished stock.
+    """
+    ensure_defaults(db)
+    previous_day = _current_day(db)
+    new_day = advance_day(db)
+    return {"previous_day": previous_day, "current_day": new_day}
+
+
+@app.get("/api/day/current", tags=["Turn Engine"])
+def api_day_current(db: Session = Depends(get_db)) -> dict:
+    return {"current_day": _current_day(db)}

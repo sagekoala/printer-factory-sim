@@ -5,37 +5,30 @@ import json
 import os
 import subprocess
 import sys
+import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import typer
 
-try:
-    from retailer.database import (
-        CatalogRow,
-        CustomerOrderRow,
-        PurchaseOrderRow,
-        SessionLocal,
-        SimStateRow,
-        StockRow,
-        init_db,
-    )
-    from retailer import simulation
-    from retailer.seed import seed_if_empty
-except ModuleNotFoundError:
-    from database import (
-        CatalogRow,
-        CustomerOrderRow,
-        PurchaseOrderRow,
-        SessionLocal,
-        SimStateRow,
-        StockRow,
-        init_db,
-    )
-    import simulation
-    from seed import seed_if_empty
+from retailer import simulation
+from retailer.database import (
+    CatalogRow,
+    CustomerOrderRow,
+    EventRow,
+    PurchaseOrderRow,
+    SessionLocal,
+    SimStateRow,
+    StockRow,
+    init_db,
+)
+from retailer.manufacturer_integration import place_manufacturer_order
 
 _RETAILER_DIR = Path(__file__).resolve().parent
+_DEFAULT_CONFIG = _RETAILER_DIR / "retailer_config.json"
+_DEFAULT_MANUFACTURER_URL = "http://localhost:8002"
+_DEFAULT_RETAILER_NAME = "PrinterWorld"
 
 app = typer.Typer(help="Retailer simulation CLI", no_args_is_help=True)
 customers_app = typer.Typer(help="Customer order commands")
@@ -47,6 +40,11 @@ app.add_typer(customers_app, name="customers")
 app.add_typer(purchase_app, name="purchase")
 app.add_typer(day_app, name="day")
 app.add_typer(price_app, name="price")
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _emit(payload) -> None:
@@ -62,6 +60,14 @@ def _load_config(config_path: Path) -> dict:
     if config_path.exists():
         return json.loads(config_path.read_text())
     return {}
+
+
+def _manufacturer_url(cfg: dict) -> str:
+    return cfg.get("retailer", {}).get("manufacturer", {}).get("url", _DEFAULT_MANUFACTURER_URL)
+
+
+def _retailer_name(cfg: dict) -> str:
+    return cfg.get("retailer", {}).get("name", _DEFAULT_RETAILER_NAME)
 
 
 # ---------------------------------------------------------------------------
@@ -97,9 +103,7 @@ def stock() -> None:
 
 
 @customers_app.command("orders", help="List customer orders (optional --status).")
-def customers_orders(
-    status: Optional[str] = typer.Option(None, "--status", help="Filter by status."),
-) -> None:
+def customers_orders(status: Optional[str] = typer.Option(None, "--status")) -> None:
     init_db()
     db = SessionLocal()
     try:
@@ -107,14 +111,16 @@ def customers_orders(
         if status:
             query = query.filter(CustomerOrderRow.status == status)
         rows = query.order_by(CustomerOrderRow.created_at).all()
-        _emit([
-            {
-                "id": r.id, "customer": r.customer, "model": r.model,
-                "quantity": r.quantity, "status": r.status,
-                "created_at": r.created_at.isoformat() if r.created_at else None,
-            }
-            for r in rows
-        ])
+        _emit(
+            [
+                {
+                    "id": r.id, "customer": r.customer, "model": r.model,
+                    "quantity": r.quantity, "status": r.status,
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                }
+                for r in rows
+            ]
+        )
     finally:
         db.close()
 
@@ -147,12 +153,11 @@ def fulfill(order_id: str) -> None:
         if order is None:
             typer.echo(f"Order {order_id!r} not found", err=True)
             raise typer.Exit(1)
-        stock = db.query(StockRow).filter(StockRow.model == order.model).first()
-        if stock is None or stock.quantity < order.quantity:
+        stock_row = db.query(StockRow).filter(StockRow.model == order.model).first()
+        if stock_row is None or stock_row.quantity < order.quantity:
             typer.echo(f"Insufficient stock for {order.quantity}x {order.model}", err=True)
             raise typer.Exit(1)
-        stock.quantity -= order.quantity
-        from datetime import datetime
+        stock_row.quantity -= order.quantity
         order.status = "fulfilled"
         order.fulfilled_at = datetime.utcnow()
         db.commit()
@@ -178,14 +183,12 @@ def backorder(order_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Purchase orders (from retailer to manufacturer)
+# Purchase orders (retailer → manufacturer)
 # ---------------------------------------------------------------------------
 
 
 @purchase_app.command("list", help="List purchase orders placed with manufacturer.")
-def purchase_list(
-    status: Optional[str] = typer.Option(None, "--status"),
-) -> None:
+def purchase_list(status: Optional[str] = typer.Option(None, "--status")) -> None:
     init_db()
     db = SessionLocal()
     try:
@@ -193,54 +196,41 @@ def purchase_list(
         if status:
             query = query.filter(PurchaseOrderRow.status == status)
         rows = query.order_by(PurchaseOrderRow.created_at).all()
-        _emit([
-            {
-                "id": r.id, "model": r.model, "quantity": r.quantity,
-                "status": r.status, "placed_day": r.placed_day,
-                "manufacturer_order_id": r.manufacturer_order_id,
-                "delivered_day": r.delivered_day,
-            }
-            for r in rows
-        ])
+        _emit(
+            [
+                {
+                    "id": r.id, "model": r.model, "quantity": r.quantity,
+                    "status": r.status, "placed_day": r.placed_day,
+                    "manufacturer_order_id": r.manufacturer_order_id,
+                    "delivered_day": r.delivered_day,
+                }
+                for r in rows
+            ]
+        )
     finally:
         db.close()
 
 
 @purchase_app.command("create", help="Order printers from the manufacturer.")
 def purchase_create(
-    model: str = typer.Argument(..., help="Printer model name."),
-    qty: int = typer.Argument(..., help="Quantity to order."),
-    config: Path = typer.Option(
-        _RETAILER_DIR / "retailer_config.json",
-        "--config",
-        help="Config file path.",
-    ),
+    model: str = typer.Argument(...),
+    qty: int = typer.Argument(...),
+    config: Path = typer.Option(_DEFAULT_CONFIG, "--config"),
 ) -> None:
     cfg = _load_config(config)
-    manufacturer_url = cfg.get("retailer", {}).get("manufacturer", {}).get("url", "http://localhost:8002")
-    retailer_name = cfg.get("retailer", {}).get("name", "PrinterWorld")
-
-    import httpx
-    from datetime import datetime
-    import uuid
+    manufacturer_url = _manufacturer_url(cfg)
+    retailer_name = _retailer_name(cfg)
 
     init_db()
     db = SessionLocal()
     try:
         day = _get_current_day(db)
         try:
-            resp = httpx.post(
-                f"{manufacturer_url}/api/orders",
-                json={"retailer_name": retailer_name, "model": model, "quantity": qty},
-                timeout=8.0,
-            )
-            resp.raise_for_status()
-            remote = resp.json()
-        except Exception as exc:
+            remote = place_manufacturer_order(manufacturer_url, retailer_name, model, qty)
+        except Exception as exc:  # httpx covers both transport and HTTP errors
             typer.echo(f"Manufacturer error: {exc}", err=True)
-            raise typer.Exit(1)
+            raise typer.Exit(1) from exc
 
-        from retailer.database import PurchaseOrderRow, EventRow
         po = PurchaseOrderRow(
             id=str(uuid.uuid4()),
             model=model,
@@ -253,8 +243,19 @@ def purchase_create(
             created_at=datetime.utcnow(),
         )
         db.add(po)
+        db.add(EventRow(
+            id=str(uuid.uuid4()),
+            day=day,
+            event_type="PURCHASE_PLACED",
+            entity_type="purchase_order",
+            entity_id=po.id,
+            description=f"Day {day}: PO placed with manufacturer — {qty}x {model}",
+        ))
         db.commit()
-        _emit({"id": po.id, "model": model, "quantity": qty, "status": po.status, "manufacturer_order_id": po.manufacturer_order_id})
+        _emit({
+            "id": po.id, "model": model, "quantity": qty,
+            "status": po.status, "manufacturer_order_id": po.manufacturer_order_id,
+        })
     finally:
         db.close()
 
@@ -286,15 +287,9 @@ def price_set(model: str, price: float) -> None:
 
 
 @day_app.command("advance", help="Advance the retailer simulation by one day.")
-def day_advance(
-    config: Path = typer.Option(
-        _RETAILER_DIR / "retailer_config.json",
-        "--config",
-        help="Config file path.",
-    ),
-) -> None:
+def day_advance(config: Path = typer.Option(_DEFAULT_CONFIG, "--config")) -> None:
     cfg = _load_config(config)
-    manufacturer_url = cfg.get("retailer", {}).get("manufacturer", {}).get("url", "http://localhost:8002")
+    manufacturer_url = _manufacturer_url(cfg)
 
     init_db()
     db = SessionLocal()
@@ -332,9 +327,7 @@ def export_command() -> None:
 
 
 @app.command("import", help="Restore simulation state from a JSON snapshot file.")
-def import_command(file: Path) -> None:
-    if not file.exists():
-        raise typer.BadParameter(f"File not found: {file}")
+def import_command(file: Path = typer.Argument(..., exists=True, readable=True)) -> None:
     snapshot = json.loads(file.read_text())
     init_db()
     db = SessionLocal()
@@ -355,12 +348,8 @@ def import_command(file: Path) -> None:
 
 @app.command("serve", help="Start the Retailer REST API server.")
 def serve(
-    port: int = typer.Option(8003, "--port", help="Port to listen on."),
-    config: Path = typer.Option(
-        _RETAILER_DIR / "retailer_config.json",
-        "--config",
-        help="Config file path.",
-    ),
+    port: int = typer.Option(8003, "--port"),
+    config: Path = typer.Option(_DEFAULT_CONFIG, "--config"),
 ) -> None:
     cfg = _load_config(config)
     name = cfg.get("retailer", {}).get("name", "retailer")

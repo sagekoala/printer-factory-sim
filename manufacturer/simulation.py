@@ -35,43 +35,26 @@ and chart history.
 
 from __future__ import annotations
 
-import random
 import uuid
 from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
-try:
-    from manufacturer.database import (
-        BOMEntryRow,
-        EventRow,
-        FactoryConfigRow,
-        ManufacturingOrderRow,
-        OutboundPurchaseOrderRow,
-        ProductRow,
-        PurchaseOrderRow,
-        SupplierCatalogRow,
-        SupplierRow,
-    )
-    from manufacturer.models import EventType, ManufacturingOrderStatus, PurchaseOrderStatus
-    from manufacturer.services.suppliers import check_deliveries
-    from manufacturer.sales_orders import advance_sales_orders
-except ModuleNotFoundError:
-    from database import (
-        BOMEntryRow,
-        EventRow,
-        FactoryConfigRow,
-        ManufacturingOrderRow,
-        OutboundPurchaseOrderRow,
-        ProductRow,
-        PurchaseOrderRow,
-        SupplierCatalogRow,
-        SupplierRow,
-    )
-    from models import EventType, ManufacturingOrderStatus, PurchaseOrderStatus
-    from services.suppliers import check_deliveries
-    from sales_orders import advance_sales_orders
+from manufacturer.database import (
+    BOMEntryRow,
+    EventRow,
+    FactoryConfigRow,
+    ManufacturingOrderRow,
+    OutboundPurchaseOrderRow,
+    ProductRow,
+    PurchaseOrderRow,
+    SupplierCatalogRow,
+    SupplierRow,
+)
+from manufacturer.models import EventType, ManufacturingOrderStatus, PurchaseOrderStatus
+from manufacturer.sales_orders import advance_sales_orders
+from manufacturer.services.suppliers import check_deliveries
 
 # ---------------------------------------------------------------------------
 # Constants (all overridable via factory_config table)
@@ -79,8 +62,6 @@ except ModuleNotFoundError:
 
 PRODUCT_NAME = "Pro 3D Printer"
 
-_DEFAULT_DEMAND_MIN: int = 5
-_DEFAULT_DEMAND_MAX: int = 15
 _DEFAULT_CAPACITY_PER_DAY: int = 10
 
 # Stable sentinel UUID used as entity_id for factory-level events
@@ -140,9 +121,17 @@ def advance_day(db: Session) -> int:
         )
 
     _deliver_purchase_orders(db, day)
-    # _generate_demand(db, day)  # Week 7: demand now comes from retailers via turn_engine
+    # Note (Week 7+): customer demand is no longer generated inside the
+    # manufacturer. Retailers POST sales orders via `/api/orders` and the
+    # turn engine releases them to production, which seeds the
+    # ManufacturingOrderRow queue read by _fulfill_manufacturing_orders.
     printers_built = _fulfill_manufacturing_orders(db, day)
     advance_sales_orders(db, day, printers_built)
+    # Snapshot today's production so the /api/capacity endpoint (and the dashboard
+    # gauge that reads it) reflect today's utilisation, not the all-time count of
+    # completed manufacturing orders.
+    _set_config(db, "last_day_produced", printers_built)
+    _set_config(db, "last_day_produced_on", day)
     db.commit()
     return day
 
@@ -557,40 +546,7 @@ def _deliver_purchase_orders(db: Session, day: int) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 3 — Demand generation
-# ---------------------------------------------------------------------------
-
-
-def _generate_demand(db: Session, day: int) -> None:
-    """Create between *demand_min* and *demand_max* new single-printer MOs.
-
-    Each generated ``ManufacturingOrder`` represents a customer order for
-    one ``Pro 3D Printer`` and starts in the ``pending`` state.
-    """
-    demand_min = int(_get_config(db, "demand_min", _DEFAULT_DEMAND_MIN))
-    demand_max = int(_get_config(db, "demand_max", _DEFAULT_DEMAND_MAX))
-    count = random.randint(demand_min, demand_max)
-
-    for _ in range(count):
-        mo_id = str(uuid.uuid4())
-        db.add(ManufacturingOrderRow(
-            id=mo_id,
-            quantity=1,
-            status=ManufacturingOrderStatus.pending.value,
-            created_at=datetime.utcnow(),
-        ))
-        _log(
-            db, day,
-            EventType.ORDER_CREATED,
-            entity_type="manufacturing_order",
-            entity_id=mo_id,
-            description=f"Day {day}: New customer demand — 1x {PRODUCT_NAME} queued",
-            extra={"product": PRODUCT_NAME, "quantity": 1},
-        )
-
-
-# ---------------------------------------------------------------------------
-# Phase 4 — Manufacturing order fulfilment
+# Phase 3 — Manufacturing order fulfilment
 # ---------------------------------------------------------------------------
 
 

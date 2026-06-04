@@ -38,7 +38,9 @@ running (e.g. `provider-cli serve`, `manufacturer-cli serve`,
 - Supply-chain flow diagram with animated dashed lines for active edges.
 - Right-hand event feed (max 20), synthesized from order lifecycle data
   and price catalogs across the three apps.
-- Auto-refresh: 10 s / 30 s / off.
+- Auto-refresh: 2 s / 5 s / 10 s / 30 s / off (default 2 s for live demos;
+  pick 30 s for long unattended runs). Toggle with `space`, force a manual
+  refresh with `R`.
 - Errors are isolated per app — one app being down doesn't crash the UI.
 
 ## Stack

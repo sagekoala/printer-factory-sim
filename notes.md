@@ -97,6 +97,264 @@ Registro de todo lo que salió mal o requirió corrección durante el desarrollo
 
 ---
 
+## 14. `cursor-agent` se cuelga en cuenta corporativa Sanofi
+
+**Problema:** Con `TURN_ENGINE_AGENT=cursor`, el `cursor-agent -p --force --trust` falla con `Failed to trust workspace at .../<subdir>` o se queda colgado >5 min en una tarea trivial. La cuenta del team Sanofi-Accelerator tiene `approvalMode: "allowlist"` (`~/.cursor/cli-config.json`) que solo permite `Shell(ls)`, y la política sobreescribe el `--force`/`--trust` en modo headless.  
+**Workaround:** No usar el backend `cursor` desde esa cuenta. Usar `TURN_ENGINE_AGENT=github` con el CLI de GitHub Copilot.
+
+---
+
+## 15. Backend GitHub Copilot — flags necesarios para headless
+
+**Problema:** Al añadir `TURN_ENGINE_AGENT=github` (`copilot -p ...`), el agente fallaba con `Permission denied and could not request permission from user` al leer `skills/*-manager.md` (vive un nivel arriba del `cwd=<role>/`). El agente se inventaba hacks (insertar SQL directo en la DB) en vez de usar el CLI documentado.  
+**Solución:** Llamar `copilot` con `--allow-all --add-dir <repo_root> --no-color`. El `--allow-all` cubre tools+paths+urls. El `--add-dir` lista explícitamente la raíz del repo para garantizar acceso a `skills/`. Implementado en `_build_agent_invocation()`.
+
+---
+
+## 16. `retailer-cli` / `manufacturer-cli` / `provider-cli` no estaban en el PATH del subprocess del agente
+
+**Problema:** Los entry points instalados via `pip install -e .` viven en `.venv/bin/`. El turn engine se invoca con `.venv/bin/python turn_engine.py` (sin `source .venv/bin/activate`), por lo que el subprocess del agente hereda un `PATH` sin `.venv/bin/`. Resultado: el agente intentaba `retailer-cli` y obtenía `command not found`, y se caía en `python cli.py` (que falla porque pip no instala typer/httpx en el python global).  
+**Solución:** En `run_agent_or_stub()`, prepender `.venv/bin` al `PATH` del subprocess via el parámetro `env=` de `subprocess.run`. El agente ahora puede invocar los entry points o `python -m <app>.cli`, ambos con las dependencias correctas.
+
+---
+
+## 17. Off-by-one entre día del escenario y `day current` de cada DB
+
+**Problema:** El prompt del agente dice "Today is day {day}" pero cuando el agente ejecuta `<role>-cli day current` ve `day {day-1}`. Origen: `advance_all()` se llama al **final** de cada turno en `run_day()`, no al inicio. Mientras los agentes deciden, el contador del DB sigue mostrando el último día completado.  
+**Impacto:** Solo cosmético — los agentes hacen las decisiones correctas (precios, releases, POs), simplemente reportan el día equivocado en su resumen.  
+**Solución (mínima, sin riesgo):** Añadida una `DAY-COUNTER NOTE` al prompt de `run_agent_or_stub()` que avisa al agente de que confíe en el día del prompt y no en el CLI. La alternativa "arquitectónica" (mover `advance_all` al inicio del turno) cambiaría el momento exacto en que se procesan deliveries y stock — descartada por riesgo de afectar la dinámica de la simulación en mitad del proyecto.
+
+---
+
+## 18. `release_to_production` no creaba manufacturing_orders — pipeline de producción rota
+
+**Problema (descubierto al analizar charts del run holiday-rush 25d):** El run terminó con `Total fulfilled = 5`, `Total backordered = 227`, `Backorder rate = 97.8%`, `finished_printer_stock = 0` y `retailer.stock = 0` durante los 25 días. La inspección directa de la DB del manufacturer reveló:
+
+- `sales_orders`: 5 `pending` (540 unidades) + 6 `released` (332 unidades)
+- `manufacturing_orders`: **0 registros**
+- `finished_printer_stock`: 0
+
+**Causa raíz:** En `manufacturer/sales_orders.py::release_to_production()`, al pasar una sales_order de `pending` a `released`, solo se cambiaba el campo `status` y se emitía un evento. **Nunca se creaban los `ManufacturingOrderRow`** que `_fulfill_manufacturing_orders()` necesita iterar para producir printers. El comentario en `simulation.py:143` confirma el origen: `# _generate_demand(db, day)  # Week 7: demand now comes from retailers via turn_engine`. En Week 5 las MOs se generaban automáticamente desde `_generate_demand`. En Week 7 se cambió la fuente de demanda a retailer-driven sales orders, pero se olvidaron de añadir la conversión sales_order → MOs. La pipeline `release → produce → ship` quedó desconectada en mitad del refactor.  
+
+**Solución:** En `release_to_production()`, después de marcar la orden como released, encolar `order.quantity` MOs single-unit en estado `pending`. El cap real de producción sigue gestionado por `capacity_per_day` en `_fulfill_manufacturing_orders()`. Las MOs son anónimas (sin FK al sales_order original) — el modelo de stock compartido + `advance_sales_orders()` shipeando FIFO según fits es suficiente.
+
+**Evidencia preservada:** El run roto se conserva en `charts/holiday25-pre-fix-prod-pipeline/` y `holiday-25d-pre-fix-prod-pipeline_metrics.jsonl` para comparar con el run post-fix. Es un buen ejemplo para el reporte de cómo un bug estructural (1 línea faltante en una función) se manifiesta como un colapso global del sistema observable solo desde las métricas agregadas.
+
+---
+
+## 19. Doble conteo de `finished_printer_stock` en `/api/day/advance`
+
+**Problema (descubierto durante el refactor Week 9):** El handler de
+`POST /api/day/advance` en `manufacturer/main.py` llamaba a
+`advance_sales_orders(db, today)` **dos veces**: una directamente en el
+handler y otra dentro de `advance_day()` (la lógica core de simulación).
+La segunda invocación tenía efectos visibles porque
+`advance_sales_orders` decrementa `finished_printer_stock` cada vez que
+intenta servir órdenes. En la práctica, el bug se enmascaraba porque
+`finished_printer_stock` solía estar a 0 cuando llegaba la segunda
+llamada, pero ante un día con mucho stock libre podía consumir hasta el
+doble de lo correcto.
+
+**Solución:** Eliminada la llamada redundante en el handler API. La
+lógica de avance vive solo en `simulation.advance_day()`. Test de
+regresión añadido en `tests/test_manufacturer_simulation.py::test_advance_day_does_not_double_count_finished_stock`.
+
+---
+
+## 20. Inconsistencia `set_price` retailer vs manufacturer (Week 9)
+
+**Problema:** El manufacturer expone `POST /api/prices/{model}` (model en
+path, body `{ "price": N }`). El retailer exponía `POST /api/prices`
+(body `{ "model": "X", "price": N }`). Dos estilos REST distintos para
+la misma operación en el mismo sistema.
+
+**Solución (breaking):** Unificado a `POST /api/prices/{model}` también
+en el retailer. Actualizados CLI y dashboard React. Sin clientes
+externos en producción que romper.
+
+---
+
+## 21. `try/except ModuleNotFoundError` en imports (Week 9)
+
+**Problema:** Cada `__init__.py` y cada `cli.py` tenía bloques `try:
+from .modulo import X / except ModuleNotFoundError: from modulo import X`
+heredados de un experimento de empaquetado temprano. El paquete está
+instalado correctamente vía `pip install -e .` con `pyproject.toml`
+declarando `packages = ["provider", "manufacturer", "retailer"]`, así
+que el fallback nunca se ejecuta. Solo añadía ruido y ocultaba errores
+reales si una dependencia faltaba.
+
+**Solución:** Eliminados todos los bloques try/except de imports. Solo
+imports relativos (`from .modulo import X`). Si alguien instala el repo
+sin `pip install -e .`, fallará claro y temprano en lugar de seguir con
+imports rotos.
+
+---
+
+## 22. Dashboard Streamlit duplicado con la UI React (Week 9)
+
+**Problema:** `manufacturer/dashboard.py` (~200 LOC) era un dashboard
+Streamlit del manufacturer. Toda su funcionalidad estaba ya cubierta
+(con mejor UX y leyendo los 3 apps a la vez) por la UI React de `ui/`.
+
+**Solución:** Borrado `manufacturer/dashboard.py` y la dependencia
+`streamlit` del `pyproject.toml`. La UI oficial es la React+Vite de
+`ui/`.
+
+---
+
+## 23. `manufacturer/provider_integration.py` shim legacy (Week 9)
+
+**Problema:** `manufacturer/provider_integration.py` era un shim
+delgado sobre `services/suppliers.py` mantenido por compatibilidad de
+imports históricos. Toda la lógica viva está en `services/suppliers.py`.
+
+**Solución:** Borrado el shim, actualizados los imports en `main.py` y
+`cli.py` para apuntar directamente a `services.suppliers`.
+
+---
+
+## 24. `provider_config.json` y `config.json` duplicados (Week 9)
+
+**Problema:** `manufacturer/` tenía dos archivos de configuración
+prácticamente idénticos: `provider_config.json` (histórico, week 6) y
+`config.json` (week 7+). Solo uno se leía realmente.
+
+**Solución:** Borrado `provider_config.json`. La única fuente de
+verdad para URLs de provider conocidos es `manufacturer/config.json`.
+
+---
+
+## 25. Provider sin `/health` (cerrando notes #9, Week 9)
+
+**Problema:** notes #9 quedó como "solo cosmético". El turn engine no
+lo necesita, pero el ranger de tests y los chequeos de readiness sí.
+
+**Solución:** Añadido `GET /health → {"status": "ok"}` en
+`provider/api.py`. Los tres apps exponen ahora el mismo endpoint.
+
+---
+
+## 26. Suite de tests pytest (Week 9)
+
+**Antes:** Cero tests automatizados. Cada bug se descubría corriendo
+escenarios de 25 días y leyendo charts.
+
+**Ahora:** 34 tests pytest cubriendo:
+
+- `tests/test_turn_engine.py` — `todays_signal`, multiplicación de
+  modificadores en eventos solapados, `append_metrics`,
+  `collect_metrics` con apps caídas, `RunState`.
+- `tests/test_manufacturer_simulation.py` — release_to_production,
+  idempotencia, capacity, BOM, regresión del bug #19 (doble conteo).
+- `tests/test_retailer_simulation.py` — auto-fulfill backorders,
+  fulfillment desde stock, set_price con path param.
+- `tests/test_provider_services.py` — tier pricing, advance day con
+  lead_time_modifier, validaciones.
+- `tests/test_analysis.py` — `plot_results` robusto a JSONL roto.
+
+Run con `pytest`. Configuración en `pyproject.toml` (`[tool.pytest.ini_options]`)
+con `testpaths = ["tests"]` y `python_paths = ["."]` (para que
+`turn_engine` se importe sin instalarlo como paquete).
+
+---
+
+## 27. `advance_all()` con parámetro muerto (Week 9)
+
+**Problema:** `turn_engine.advance_all(signal, config)` recibía
+`signal` y nunca lo usaba. El `lead_time_modifier` se calculaba dentro
+de la función a partir de `signal` pero `signal` ya no se propagaba
+correctamente porque la función se llamaba antes de recibirlo. Resultado:
+el lead_time del provider siempre era 1.0 aunque el escenario dijera
+otra cosa.
+
+**Solución:** Encapsulado todo el estado por-run en un `RunState`
+dataclass, eliminados los globals, y `advance_all()` toma `signal`
+explícito y propaga `lead_time_modifier` al provider via
+`?lead_time_modifier=X`.
+
+---
+
+## 28. `advance_sales_orders` shipeaba órdenes `pending` (Week 9 follow-up)
+
+**Problema:** El filtro era `status.in_(["pending", "released"])`. Una sales
+order que el agente nunca liberó podía consumir stock terminado dejado por
+otra orden (modelo de pool compartido), lo que rompía el pipeline pedagógico
+`pending → released → delivered` — el agente "aprendía" que el release era
+opcional.
+
+**Solución:** Filtro restringido a `status == "released"`. Una orden que
+nunca se libera se queda `pending` para siempre y aparece en `sales orders`
+como recordatorio visible. Test de regresión:
+`test_advance_sales_orders_does_not_ship_pending_orders`.
+
+---
+
+## 29. `cwd` relativo en `run_agent_or_stub` (Week 9 follow-up)
+
+**Problema:** `turn_engine.run_day` pasaba el `path` del rol literal
+(`"retailer"`, `"manufacturer"`, `"provider"`) como `cwd` al subprocess del
+agente. Funcionaba solo si el turn engine se invocaba desde la raíz del
+repo. Desde CI, IDE o cualquier otra ruta el agente no podía encontrar sus
+DBs ni los CLIs.
+
+**Solución:** Nueva función `_abs_cwd(role_path)` que resuelve cualquier
+path relativo contra `_REPO_ROOT` (definido desde `__file__`). Paths
+absolutos pasan sin tocar. Test:
+`test_abs_cwd_resolves_relative_role_path_against_repo_root`.
+
+---
+
+## 30. JSONL incompleto: `supply_modifier` y `lead_time_modifier` (Week 9 follow-up)
+
+**Problema:** `collect_metrics` solo persistía `demand_modifier` en el JSONL.
+Los otros dos modificadores (`supply_modifier`, `lead_time_modifier`) se
+calculaban en `todays_signal` y se usaban en logs efímeros pero nunca
+llegaban al fichero de métricas. Resultado: los charts y el informe no
+podían atribuir un colapso de stock a un evento de supply o lead-time —
+solo a uno de demand.
+
+**Solución:** Añadidos los tres modificadores al payload de
+`collect_metrics`. Test: `test_collect_metrics_persists_all_three_modifiers`.
+
+**Nota pendiente (no fix en este PR):** El provider sigue ignorando
+`supply_modifier` por completo a la hora de despachar — solo aplica
+`lead_time_modifier`. La opción correcta es propagar `supply_modifier` al
+`POST /api/day/advance` del provider y limitar el número de órdenes shipped
+por día. Queda como issue futuro porque cambia el contrato HTTP y el
+balance de varios escenarios.
+
+---
+
+## 31. Schema rename: `orders_fulfilled_total` / `orders_backordered_total`
+
+**Problema:** El JSONL guardaba `orders_fulfilled` y `orders_backordered`
+como conteos cumulativos desde el inicio del run. El nombre no lo decía,
+así que un lector ocasional asumía que eran diarios. `plot_results.py` y
+`run_day` ya conocían el truco y diffeaban internamente, pero cualquiera
+que leyera el JSONL crudo se confundía.
+
+**Solución:** Renombrados a `orders_fulfilled_total` y
+`orders_backordered_total`. `plot_results.py` lee primero el nuevo nombre y
+cae al viejo si no existe (compatibilidad hacia atrás con runs ya
+generados).
+
+---
+
+## 32. Filtro del retailer incluía estados no usados (cosmético)
+
+**Problema:** `_sync_purchase_orders` filtraba por `["pending", "confirmed",
+"in_progress", "released", "shipped"]`. El manufacturer nunca emite
+`"shipped"` como estado distinto — pasa directo de `released` a
+`delivered` estampando ambos days en la misma transición. Inofensivo pero
+ruidoso al leer.
+
+**Solución:** Filtro limpio a `["pending", "confirmed", "in_progress",
+"released"]` con un comentario explicando el lifecycle real del
+manufacturer.
+
+---
+
 ## Estado final del checklist (week7.pdf Parte 7)
 
 | Item | Estado |

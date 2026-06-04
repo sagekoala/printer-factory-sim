@@ -1,15 +1,13 @@
 """Command-line interface for the manufacturer simulation app.
 
-Run as::
+Run from the repo root with the venv active::
 
-    python -m manufacturer.cli <command>
-
-After ``pip install -e .``::
-
-    manufacturer-cli <command>
+    manufacturer-cli <command>     # via the installed entry point
+    python -m manufacturer.cli ... # equivalent fallback
 
 Every command is a thin wrapper around a function in
-:mod:`manufacturer.services` (provider integration) or
+:mod:`manufacturer.services.suppliers` (provider integration),
+:mod:`manufacturer.sales_orders` (inbound retailer orders), or
 :mod:`manufacturer.simulation` (factory clock + state).
 """
 
@@ -21,40 +19,32 @@ from typing import Optional
 
 import typer
 
-try:
-    from manufacturer.database import (
-        FactoryConfigRow,
-        ManufacturingOrderRow,
-        ProductRow,
-        SessionLocal,
-        init_db,
-    )
-    from manufacturer.models import ManufacturingOrderStatus
-    from manufacturer.services.suppliers import (
-        ProviderError,
-        get_catalog,
-        list_providers,
-        list_purchase_orders,
-        place_order,
-    )
-    from manufacturer.simulation import advance_day, export_state, import_state
-except ModuleNotFoundError:
-    from database import (  # type: ignore[no-redef]
-        FactoryConfigRow,
-        ManufacturingOrderRow,
-        ProductRow,
-        SessionLocal,
-        init_db,
-    )
-    from models import ManufacturingOrderStatus  # type: ignore[no-redef]
-    from services.suppliers import (  # type: ignore[no-redef]
-        ProviderError,
-        get_catalog,
-        list_providers,
-        list_purchase_orders,
-        place_order,
-    )
-    from simulation import advance_day, export_state, import_state  # type: ignore[no-redef]
+from manufacturer.database import (
+    FactoryConfigRow,
+    ManufacturingOrderRow,
+    ProductRow,
+    SessionLocal,
+    init_db,
+)
+from manufacturer.models import ManufacturingOrderStatus
+from manufacturer.sales_orders import (
+    ensure_defaults,
+    get_capacity_info,
+    get_production_status,
+    get_sales_order,
+    get_wholesale_prices,
+    list_sales_orders,
+    release_to_production,
+    set_wholesale_price,
+)
+from manufacturer.services.suppliers import (
+    ProviderError,
+    get_catalog,
+    list_providers,
+    list_purchase_orders,
+    place_order,
+)
+from manufacturer.simulation import advance_day, export_state, import_state
 
 
 app = typer.Typer(help="Manufacturer simulation CLI", no_args_is_help=True)
@@ -62,19 +52,22 @@ orders_app = typer.Typer(help="Manufacturing order commands")
 purchase_app = typer.Typer(help="Outbound provider purchase order commands")
 day_app = typer.Typer(help="Simulation day commands")
 suppliers_app = typer.Typer(help="External supplier commands")
+sales_app = typer.Typer(help="Inbound sales order commands (from retailers)")
+production_app = typer.Typer(help="Production management commands")
+price_app = typer.Typer(help="Wholesale pricing commands")
 
 app.add_typer(orders_app, name="orders")
 app.add_typer(purchase_app, name="purchase")
 app.add_typer(day_app, name="day")
 app.add_typer(suppliers_app, name="suppliers")
+app.add_typer(sales_app, name="sales")
+app.add_typer(production_app, name="production")
+app.add_typer(price_app, name="price")
 
 
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
-
-
-_PURCHASE_STATUS_VALUES = ["pending", "confirmed", "in_progress", "shipped", "delivered"]
 
 
 def _get_current_day(db) -> int:
@@ -126,11 +119,7 @@ def stock() -> None:
 
 @orders_app.command("list", help="List manufacturing orders.")
 def orders_list(
-    status: Optional[ManufacturingOrderStatus] = typer.Option(
-        None,
-        "--status",
-        help="Filter by manufacturing order status.",
-    ),
+    status: Optional[ManufacturingOrderStatus] = typer.Option(None, "--status"),
 ) -> None:
     init_db()
     db = SessionLocal()
@@ -168,10 +157,7 @@ def suppliers_list() -> None:
     _emit(list_providers())
 
 
-@suppliers_app.command(
-    "catalog",
-    help="Show the catalog (products + tiers + stock) for a configured supplier.",
-)
+@suppliers_app.command("catalog", help="Show the catalog for a configured supplier.")
 def suppliers_catalog(supplier_name: str) -> None:
     init_db()
     supplier = _provider_or_raise(supplier_name)
@@ -186,18 +172,11 @@ def suppliers_catalog(supplier_name: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@purchase_app.command(
-    "create",
-    help="Place a new purchase order with a configured external provider.",
-)
+@purchase_app.command("create", help="Place a new purchase order with a configured external provider.")
 def purchase_create(
-    supplier: str = typer.Option(..., "--supplier", help="Supplier name from config.json."),
-    product_id: str = typer.Option(
-        ...,
-        "--product-id",
-        help="Provider product id (e.g. p-0001).",
-    ),
-    qty: int = typer.Option(..., "--qty", min=1, help="Units to order."),
+    supplier: str = typer.Option(..., "--supplier"),
+    product_id: str = typer.Option(..., "--product-id"),
+    qty: int = typer.Option(..., "--qty", min=1),
 ) -> None:
     init_db()
     supplier_entry = _provider_or_raise(supplier)
@@ -212,9 +191,7 @@ def purchase_create(
                 quantity=qty,
                 current_day=_get_current_day(db),
             )
-        except ProviderError as exc:
-            raise typer.BadParameter(str(exc)) from exc
-        except ValueError as exc:
+        except (ProviderError, ValueError) as exc:
             raise typer.BadParameter(str(exc)) from exc
         _emit(row)
     finally:
@@ -222,16 +199,7 @@ def purchase_create(
 
 
 @purchase_app.command("list", help="List local outbound purchase orders.")
-def purchase_list(
-    status: Optional[str] = typer.Option(
-        None,
-        "--status",
-        help=(
-            "Filter by status. Accepts any provider status, "
-            f"commonly: {', '.join(_PURCHASE_STATUS_VALUES)}"
-        ),
-    ),
-) -> None:
+def purchase_list(status: Optional[str] = typer.Option(None, "--status")) -> None:
     init_db()
     db = SessionLocal()
     try:
@@ -283,12 +251,8 @@ def export_command() -> None:
 
 
 @app.command("import", help="Restore full simulation state from a JSON snapshot file.")
-def import_command(file: Path) -> None:
-    if not file.exists():
-        raise typer.BadParameter(f"File not found: {file}")
-
+def import_command(file: Path = typer.Argument(..., exists=True, readable=True)) -> None:
     snapshot = json.loads(file.read_text())
-
     init_db()
     db = SessionLocal()
     try:
@@ -302,64 +266,27 @@ def import_command(file: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Week 7 additions — sales orders, production, capacity, wholesale prices
+# Sales orders (inbound from retailers)
 # ---------------------------------------------------------------------------
-
-try:
-    from manufacturer.database import FinishedPrinterStockRow, SalesOrderRow, WholesalePriceRow
-    from manufacturer.sales_orders import (
-        get_capacity_info,
-        get_production_status,
-        list_sales_orders as _list_sales_orders,
-        get_sales_order as _get_sales_order,
-        release_to_production as _release_to_production,
-        get_wholesale_prices,
-        set_wholesale_price as _set_wholesale_price,
-        get_finished_stock,
-        ensure_defaults,
-    )
-except ModuleNotFoundError:
-    from database import FinishedPrinterStockRow, SalesOrderRow, WholesalePriceRow  # type: ignore
-    from sales_orders import (  # type: ignore
-        get_capacity_info,
-        get_production_status,
-        list_sales_orders as _list_sales_orders,
-        get_sales_order as _get_sales_order,
-        release_to_production as _release_to_production,
-        get_wholesale_prices,
-        set_wholesale_price as _set_wholesale_price,
-        get_finished_stock,
-        ensure_defaults,
-    )
-
-sales_app = typer.Typer(help="Inbound sales order commands (from retailers)")
-production_app = typer.Typer(help="Production management commands")
-price_app = typer.Typer(help="Wholesale pricing commands")
-
-app.add_typer(sales_app, name="sales")
-app.add_typer(production_app, name="production")
-app.add_typer(price_app, name="price")
 
 
 @sales_app.command("orders", help="List sales orders received from retailers.")
-def sales_orders(
-    status: Optional[str] = typer.Option(None, "--status", help="Filter by status."),
-) -> None:
+def sales_orders_cmd(status: Optional[str] = typer.Option(None, "--status")) -> None:
     init_db()
     db = SessionLocal()
     try:
         ensure_defaults(db)
-        _emit(_list_sales_orders(db, status=status))
+        _emit(list_sales_orders(db, status=status))
     finally:
         db.close()
 
 
 @sales_app.command("order", help="Show details of a sales order.")
-def sales_order(order_id: str) -> None:
+def sales_order_cmd(order_id: str) -> None:
     init_db()
     db = SessionLocal()
     try:
-        order = _get_sales_order(db, order_id)
+        order = get_sales_order(db, order_id)
         if order is None:
             typer.echo(f"Sales order {order_id!r} not found", err=True)
             raise typer.Exit(1)
@@ -369,12 +296,12 @@ def sales_order(order_id: str) -> None:
 
 
 @production_app.command("release", help="Release a pending sales order to production.")
-def production_release(order_id: str) -> None:
+def production_release_cmd(order_id: str) -> None:
     init_db()
     db = SessionLocal()
     try:
         current_day = _get_current_day(db)
-        ok, msg = _release_to_production(db, order_id, current_day)
+        ok, msg = release_to_production(db, order_id, current_day)
         if not ok:
             typer.echo(msg, err=True)
             raise typer.Exit(1)
@@ -384,7 +311,7 @@ def production_release(order_id: str) -> None:
 
 
 @production_app.command("status", help="Show what is currently being produced.")
-def production_status() -> None:
+def production_status_cmd() -> None:
     init_db()
     db = SessionLocal()
     try:
@@ -420,15 +347,9 @@ def price_set(model: str, price: float) -> None:
     init_db()
     db = SessionLocal()
     try:
-        current_day = _get_current_day(db)
-        _emit(_set_wholesale_price(db, model, price, current_day))
+        _emit(set_wholesale_price(db, model, price, _get_current_day(db)))
     finally:
         db.close()
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 
 def main() -> None:
